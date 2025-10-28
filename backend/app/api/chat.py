@@ -86,21 +86,20 @@ async def chat_stream(request: ChatRequest):
                   # 发送节点开始事件
                   yield f"data: {json.dumps({'type': 'node_start', 'node': node_name}, ensure_ascii=False)}\n\n"
 
-                  # 发送消息内容
+                  # 发送消息内容（打字机效果）
                   if "messages" in node_output and node_output["messages"]:
                       last_message = node_output["messages"][-1]
                       content = last_message.content
 
                       # 过滤掉 Supervisor 的内部消息
                       if not content.startswith("[Supervisor]"):
-                          yield f"data: {json.dumps({'type': 'message', 'content': content, 'node': node_name},
-ensure_ascii=False)}\n\n"
+                          # 逐字符发送，实现打字机效果
+                          for char in content:
+                              yield f"data: {json.dumps({'type': 'token', 'content': char, 'node': node_name}, ensure_ascii=False)}\n\n"
+                              await asyncio.sleep(0.02)  # 每个字符延迟 20ms
 
                   # 发送节点完成事件
                   yield f"data: {json.dumps({'type': 'node_end', 'node': node_name}, ensure_ascii=False)}\n\n"
-
-                  # 添加小延迟，让前端能看到流式效果
-                  await asyncio.sleep(0.1)
 
           # 发送完成事件
           yield f"data: {json.dumps({'type': 'done', 'message': '处理完成'}, ensure_ascii=False)}\n\n"
