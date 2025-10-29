@@ -50,10 +50,16 @@ def create_weather_agent():
 def weather_agent(state: AgentState) -> AgentState:
     """Weather Agent: 处理天气查询任务"""
 
+    messages = state["messages"]
+
+    print(f"[Weather Agent] 处理消息数量: {len(messages)}")
+    for msg in messages[-3:]:  # 只打印最近3条，避免日志过长
+        print(f"  - {msg.__class__.__name__}: {msg.content[:50]}...")
+
     agent_executor = create_weather_agent()
 
     result = agent_executor.invoke({
-        "messages": state["messages"],
+        "messages": messages,  # 传递完整消息历史
     })
 
     completed_tasks = state.get("completed_tasks", [])

@@ -1,10 +1,11 @@
 """LangGraph Workflow 构建"""
 from langgraph.graph import StateGraph, END
+import sqlite3
 
 from ..state.agent_state import AgentState
 from ..agents.supervisor import supervisor_agent
 from ..agents.weather import weather_agent
-
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 def create_workflow():
   """创建 Multi-Agent Workflow"""
@@ -41,8 +42,12 @@ def create_workflow():
   # Weather Agent 完成后回到 Supervisor
   workflow.add_edge("weather", "supervisor")
 
-  # 编译（暂时不使用 checkpointer）
-  app = workflow.compile()
+  # 创建 Checkpointing（持久化对话状态）
+  # 使用 with 语句正确初始化 SqliteSaver
+  conn = sqlite3.connect("data/checkpoints.db", check_same_thread=False)
+  memory = SqliteSaver(conn)
 
+  # 编译 Workflow 并启用 Checkpointing
+  app = workflow.compile(checkpointer=memory)
 
   return app

@@ -4,7 +4,7 @@ import { ChatMessage } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 
 export const ChatInterface: React.FC = () => {
-const { messages, isLoading, error, sendMessage, clearMessages } = useChatStream();
+const { messages, isLoading, error, sendMessage, clearMessages, startNewChat } = useChatStream();
 const messagesEndRef = useRef<HTMLDivElement>(null);
 
 // 自动滚动到底部
@@ -17,12 +17,20 @@ return (
     {/* Header */}
     <div className="bg-blue-500 text-white p-4 flex justify-between items-center">
       <h1 className="text-xl font-bold">🤖 智能助手</h1>
-      <button
-        onClick={clearMessages}
-        className="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm"
-      >
-        清空对话
-      </button>
+      <div className="flex gap-2">
+        <button
+          onClick={clearMessages}
+          className="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm"
+        >
+          清空对话
+        </button>
+        <button
+          onClick={startNewChat}
+          className="px-3 py-1 bg-green-600 hover:bg-green-700 rounded text-sm"
+        >
+          新建对话
+        </button>
+      </div>
     </div>
 
     {/* Messages */}

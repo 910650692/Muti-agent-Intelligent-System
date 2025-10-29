@@ -30,6 +30,9 @@ async def chat(request: ChatRequest):
   # 创建 Workflow
   app = create_workflow()
 
+  # 配置 Checkpointing（使用 thread_id）
+  config = {"configurable": {"thread_id": request.thread_id}}
+
   # 构造初始状态
   initial_state = {
       "messages": [HumanMessage(content=request.message)],
@@ -38,8 +41,8 @@ async def chat(request: ChatRequest):
       "thread_id": request.thread_id
   }
 
-  # 运行 Workflow
-  final_state = app.invoke(initial_state)
+  # 运行 Workflow（传入 config）
+  final_state = app.invoke(initial_state, config)
 
   # 提取最终响应（排除 Supervisor 的消息）
   response_messages = []
@@ -72,6 +75,9 @@ async def chat_stream(request: ChatRequest):
           # 创建 Workflow
           app = create_workflow()
 
+          # 配置 Checkpointing（使用 thread_id）
+          config = {"configurable": {"thread_id": thread_id}}
+
           # 构造初始状态
           initial_state = {
               "messages": [HumanMessage(content=user_message)],
@@ -80,8 +86,8 @@ async def chat_stream(request: ChatRequest):
               "thread_id": thread_id
           }
 
-          # 运行 Workflow 并流式输出
-          for output in app.stream(initial_state):
+          # 运行 Workflow 并流式输出（传入 config）
+          for output in app.stream(initial_state, config):
               for node_name, node_output in output.items():
                   # 发送节点开始事件
                   yield f"data: {json.dumps({'type': 'node_start', 'node': node_name}, ensure_ascii=False)}\n\n"

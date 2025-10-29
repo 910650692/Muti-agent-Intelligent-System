@@ -36,16 +36,6 @@ def supervisor_agent(state: AgentState) -> AgentState:
     messages = state["messages"]
     completed_tasks = state.get("completed_tasks", [])
 
-    # 检查是否已经完成了 weather 任务
-    if "weather" in completed_tasks:
-        print("[Supervisor] 天气任务已完成，准备结束")
-        return {
-            "messages": [AIMessage(content="[Supervisor] 所有任务已完成")],
-            "next_agent": "finish",
-            "completed_tasks": completed_tasks,
-            "thread_id": state["thread_id"],
-        }
-
     # 获取最后一条用户消息
     last_user_message = None
     for msg in reversed(messages):
@@ -56,8 +46,28 @@ def supervisor_agent(state: AgentState) -> AgentState:
     if not last_user_message:
         last_user_message = messages[-1].content if messages else ""
 
-    # 简单逻辑：如果提到天气且未完成，调用 weather
-    if "天气" in last_user_message or "weather" in last_user_message.lower():
+    # 检查本轮对话是否已经完成了 weather 任务
+    # 通过检查最近的消息来判断，而不是依赖 completed_tasks
+    recent_messages = messages[-5:] if len(messages) >= 5 else messages
+    has_weather_response = any(
+        msg.content and not msg.content.startswith("[Supervisor]")
+        for msg in recent_messages
+        if isinstance(msg, AIMessage)
+    )
+
+    # 如果刚刚完成了 weather 查询，则结束
+    if "weather" in completed_tasks and has_weather_response:
+        print("[Supervisor] 本轮天气任务已完成，准备结束")
+        return {
+            "messages": [AIMessage(content="[Supervisor] 所有任务已完成")],
+            "next_agent": "finish",
+            "completed_tasks": [],  # 重置 completed_tasks
+            "thread_id": state["thread_id"],
+        }
+
+    # 简单逻辑：如果提到天气相关内容，调用 weather
+    weather_keywords = ["天气", "weather", "温度", "明天", "后天", "今天"]
+    if any(keyword in last_user_message for keyword in weather_keywords):
         next_agent = "weather"
     else:
         next_agent = "finish"
@@ -67,6 +77,6 @@ def supervisor_agent(state: AgentState) -> AgentState:
     return {
         "messages": [AIMessage(content=f"[Supervisor] 决定调用: {next_agent}")],
         "next_agent": next_agent,
-        "completed_tasks": completed_tasks,
+        "completed_tasks": [],  # 重置 completed_tasks，为下次对话做准备
         "thread_id": state["thread_id"],
     }
