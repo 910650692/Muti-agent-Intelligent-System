@@ -62,12 +62,9 @@ def weather_agent(state: AgentState) -> AgentState:
         "messages": messages,  # 传递完整消息历史
     })
 
-    completed_tasks = state.get("completed_tasks", [])
-    completed_tasks.append("weather")
-
     return {
         "messages": [AIMessage(content=result["output"])],
-        "completed_tasks": completed_tasks,
+        "completed_tasks": state.get("completed_tasks", []) + ["天气查询"],
         "next_agent": "supervisor",
         "thread_id": state["thread_id"]
     }

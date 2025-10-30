@@ -6,6 +6,7 @@ from ..state.agent_state import AgentState
 from ..agents.supervisor import supervisor_agent
 from ..agents.weather import weather_agent
 from ..agents.general import general_agent
+from ..agents.train import train_agent  # 导入train agent
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 def create_workflow():
@@ -18,6 +19,7 @@ def create_workflow():
   workflow.add_node("supervisor", supervisor_agent)
   workflow.add_node("weather", weather_agent)
   workflow.add_node("general", general_agent)
+  workflow.add_node("train", train_agent)  # 添加train节点
 
   # 设置入口点
   workflow.set_entry_point("supervisor")
@@ -31,6 +33,8 @@ def create_workflow():
       return "weather"
     elif next_agent == "general":
       return "general"
+    elif next_agent == "train":
+      return "train"
     else:
       return "finish"
 
@@ -40,6 +44,7 @@ def create_workflow():
     {
       "weather": "weather",
       "general": "general",
+      "train": "train",
       "finish": END,
     }
   )
@@ -49,6 +54,9 @@ def create_workflow():
 
   # General Agent 完成后回到 Supervisor
   workflow.add_edge("general", "supervisor")
+
+  # Train Agent 完成后回到 Supervisor
+  workflow.add_edge("train", "supervisor")
 
   # 创建 Checkpointing（持久化对话状态）
   # 使用 with 语句正确初始化 SqliteSaver

@@ -17,3 +17,6 @@ class AgentState(TypedDict):
 
     # 会话 ID
     thread_id: str
+
+    # 循环计数器（防止死循环）
+    iteration_count: int

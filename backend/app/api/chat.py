@@ -38,7 +38,8 @@ async def chat(request: ChatRequest):
       "messages": [HumanMessage(content=request.message)],
       "next_agent": "",
       "completed_tasks": [],
-      "thread_id": request.thread_id
+      "thread_id": request.thread_id,
+      "iteration_count": 0  # 初始化循环计数器
   }
 
   # 运行 Workflow（传入 config）
@@ -83,7 +84,8 @@ async def chat_stream(request: ChatRequest):
               "messages": [HumanMessage(content=user_message)],
               "next_agent": "",
               "completed_tasks": [],
-              "thread_id": thread_id
+              "thread_id": thread_id,
+              "iteration_count": 0  # 初始化循环计数器
           }
 
           # 运行 Workflow 并流式输出（传入 config）
