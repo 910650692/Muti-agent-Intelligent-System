@@ -1,5 +1,5 @@
 """Train Agent: 查询火车票信息"""
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
@@ -61,8 +61,8 @@ def create_train_agent():
     return AgentExecutor(agent=agent, tools=train_tools, verbose=True)
 
 
-def train_agent(state: AgentState) -> AgentState:
-    """Train Agent: 处理火车票查询任务"""
+async def train_agent(state: AgentState) -> AgentState:
+    """Train Agent: 处理火车票查询任务（支持并行工具调用）"""
 
     messages = state["messages"]
 
@@ -70,26 +70,51 @@ def train_agent(state: AgentState) -> AgentState:
     for msg in messages[-3:]:
         print(f"  - {msg.__class__.__name__}: {msg.content[:50]}...")
 
+    # ✅ 清理消息：只保留用户消息和最近的上下文
+    cleaned_messages = []
+    for msg in messages:
+        # 保留所有用户消息
+        if isinstance(msg, HumanMessage):
+            cleaned_messages.append(msg)
+        # 过滤掉其他Agent的回复（避免干扰）
+        elif isinstance(msg, AIMessage):
+            content = msg.content
+            # 跳过Supervisor的路由消息
+            if content.startswith("[Supervisor]"):
+                continue
+            # 跳过无关的长回复
+            if len(content) > 500:
+                continue
+            # 保留简短的相关回复
+            cleaned_messages.append(msg)
+
+    # 如果清理后没有消息，至少保留最后一条用户消息
+    if not cleaned_messages:
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage):
+                cleaned_messages = [msg]
+                break
+
+    print(f"[Train Agent] 清理后消息数量: {len(cleaned_messages)}")
+
     try:
         agent_executor = create_train_agent()
 
         if agent_executor is None:
             return {
                 "messages": [AIMessage(content="抱歉，火车票查询服务暂时不可用")],
-                "completed_tasks": state.get("completed_tasks", []) + ["火车票查询"],
-                "next_agent": "supervisor",
-                "thread_id": state["thread_id"]
+                "completed_tasks": ["火车票查询"],
             }
 
-        result = agent_executor.invoke({
-            "messages": messages,
+        # ✅ 使用 ainvoke 支持异步执行和并行工具调用
+        # 如果LLM返回多个tool_calls（如查询多个车次），会自动并行执行
+        result = await agent_executor.ainvoke({
+            "messages": cleaned_messages,  # ✅ 传递清理后的消息
         })
 
         return {
             "messages": [AIMessage(content=result["output"])],
-            "completed_tasks": state.get("completed_tasks", []) + ["火车票查询"],
-            "next_agent": "supervisor",
-            "thread_id": state["thread_id"]
+            "completed_tasks": ["火车票查询"],
         }
 
     except Exception as e:
@@ -99,7 +124,5 @@ def train_agent(state: AgentState) -> AgentState:
 
         return {
             "messages": [AIMessage(content=f"抱歉，火车票查询出现错误：{str(e)}")],
-            "completed_tasks": state.get("completed_tasks", []) + ["火车票查询"],
-            "next_agent": "supervisor",
-            "thread_id": state["thread_id"]
+            "completed_tasks": ["火车票查询"],
         }

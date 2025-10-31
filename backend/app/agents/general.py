@@ -133,14 +133,41 @@ def create_general_agent():
     )
 
 
-def general_agent(state: AgentState) -> AgentState:
-    """General Agent: 处理通用对话任务（使用搜索工具和可选的 MCP 工具）"""
+async def general_agent(state: AgentState) -> AgentState:
+    """General Agent: 处理通用对话任务（使用搜索工具和可选的 MCP 工具，支持并行工具调用）"""
 
     messages = state["messages"]
 
     print(f"[General Agent] 处理消息数量: {len(messages)}")
     for msg in messages[-3:]:  # 只打印最近3条
         print(f"  - {msg.__class__.__name__}: {msg.content[:50]}...")
+
+    # ✅ 清理消息：只保留用户消息和最近的上下文
+    cleaned_messages = []
+    for msg in messages:
+        # 保留所有用户消息
+        if isinstance(msg, HumanMessage):
+            cleaned_messages.append(msg)
+        # 过滤掉其他Agent的回复（避免干扰）
+        elif isinstance(msg, AIMessage):
+            content = msg.content
+            # 跳过Supervisor的路由消息
+            if content.startswith("[Supervisor]"):
+                continue
+            # 跳过无关的长回复
+            if len(content) > 500:
+                continue
+            # 保留简短的相关回复
+            cleaned_messages.append(msg)
+
+    # 如果清理后没有消息，至少保留最后一条用户消息
+    if not cleaned_messages:
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage):
+                cleaned_messages = [msg]
+                break
+
+    print(f"[General Agent] 清理后消息数量: {len(cleaned_messages)}")
 
     try:
         # 创建 Agent（每次都重新加载工具，确保使用最新配置）
@@ -151,12 +178,13 @@ def general_agent(state: AgentState) -> AgentState:
             print("[General Agent] 使用普通 LLM 模式（无 MCP 工具）")
             llm = get_llm()
 
-            response = llm.invoke(general_prompt_no_tools.format_messages(messages=messages))
+            response = await llm.ainvoke(general_prompt_no_tools.format_messages(messages=cleaned_messages))
             final_output = response.content
         else:
-            # 调用 Agent（会自动决定是否使用工具）
-            result = agent_executor.invoke({
-                "messages": messages
+            # ✅ 使用 ainvoke 支持异步执行和并行工具调用
+            # 如果LLM返回多个tool_calls（如并行搜索多个关键词），会自动并行执行
+            result = await agent_executor.ainvoke({
+                "messages": cleaned_messages  # ✅ 传递清理后的消息
             })
 
             # 提取最终输出
@@ -164,9 +192,7 @@ def general_agent(state: AgentState) -> AgentState:
 
         return {
             "messages": [AIMessage(content=final_output)],
-            "completed_tasks": state.get("completed_tasks", []) + ["通用对话"],
-            "next_agent": "supervisor",
-            "thread_id": state["thread_id"]
+            "completed_tasks": ["通用对话"],
         }
 
     except Exception as e:
@@ -177,11 +203,9 @@ def general_agent(state: AgentState) -> AgentState:
         # 降级处理：直接使用 LLM 回答
         print("[General Agent] 降级到直接 LLM 回答")
         llm = get_llm()
-        response = llm.invoke(messages)
+        response = await llm.ainvoke(cleaned_messages)
 
         return {
             "messages": [AIMessage(content=response.content)],
-            "completed_tasks": state.get("completed_tasks", []) + ["通用对话"],
-            "next_agent": "supervisor",
-            "thread_id": state["thread_id"]
+            "completed_tasks": ["通用对话"],
         }
