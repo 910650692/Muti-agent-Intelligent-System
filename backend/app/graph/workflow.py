@@ -8,6 +8,7 @@ from ..agents.supervisor import supervisor_agent
 from ..agents.weather import weather_agent
 from ..agents.general import general_agent
 from ..agents.train import train_agent
+from ..agents.navigation import navigation_agent
 from ..agents.aggregate import aggregate_agent  # 导入aggregate节点
 
 def create_workflow(checkpointer):
@@ -28,6 +29,7 @@ def create_workflow(checkpointer):
     workflow.add_node("weather", weather_agent)
     workflow.add_node("general", general_agent)
     workflow.add_node("train", train_agent)
+    workflow.add_node("navigation", navigation_agent)  # ✅ 添加导航节点
     workflow.add_node("aggregate", aggregate_agent)  # ✅ 添加aggregate节点
 
     # 设置入口点
@@ -69,6 +71,7 @@ def create_workflow(checkpointer):
     workflow.add_edge("weather", "aggregate")
     workflow.add_edge("general", "aggregate")
     workflow.add_edge("train", "aggregate")
+    workflow.add_edge("navigation", "aggregate")  # ✅ 导航agent完成后也汇总
 
     # ✅ Aggregate汇总后，回到Supervisor继续决策
     workflow.add_edge("aggregate", "supervisor")

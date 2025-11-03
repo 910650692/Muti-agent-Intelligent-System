@@ -18,6 +18,12 @@
       ],
       "description": "必应中国搜索，支持中文搜索和网页内容获取（无需 API Key）",
       "enabled": false
+    },
+    "sgm-navigation": {
+      "transport": "sse",
+      "url": "http://localhost:8080/sse",
+      "description": "SGM车载导航服务，支持位置查询、POI搜索、路线规划、导航控制等功能",
+      "enabled": true
     }
   }
 }
