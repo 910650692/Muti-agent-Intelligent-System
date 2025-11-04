@@ -111,10 +111,17 @@ class NavigationAgent:
         print(f"\n[Reasoning] 开始推理，当前消息数: {len(messages)}")
 
         # ✅ 智能选择LLM（自动检测是否有图片）
+        from ..llm import has_image_content
+        is_multimodal = has_image_content(messages)
         llm = get_llm(messages=messages)
 
-        # ✅ 绑定所有工具
-        model_with_tools = llm.bind_tools(self.tools)
+        # ✅ 关键修复：视觉模型不绑定工具（可能不支持function calling）
+        if is_multimodal:
+            print("[Reasoning] 检测到图片，使用纯视觉模型（不绑定工具）")
+            model_with_tools = llm  # 不绑定工具
+        else:
+            print("[Reasoning] 纯文本模式，绑定所有工具")
+            model_with_tools = llm.bind_tools(self.tools)
 
         # 构建完整的消息（system + history）
         full_messages = [
@@ -134,6 +141,15 @@ class NavigationAgent:
         # 构建AI消息
         content = getattr(merged_chunk, "content", "") or ""
         tool_calls = getattr(merged_chunk, "tool_calls", None)
+
+        # 🐛 调试：打印LLM返回的原始内容
+        print(f"[Reasoning DEBUG] LLM返回内容长度: {len(content)}")
+        print(f"[Reasoning DEBUG] 内容预览: {content[:100] if content else '(空)'}")
+
+        # ✅ 如果LLM返回空内容，给出友好提示
+        if not content and not tool_calls:
+            print("[Reasoning] ⚠️ LLM返回空内容，可能是图片格式问题或API错误")
+            content = "抱歉，我无法识别这张图片。请尝试：\n1. 重新上传图片\n2. 确保图片清晰可见\n3. 或者直接描述您的问题"
 
         ai_message = AIMessage(
             content=content,
