@@ -9,14 +9,21 @@ from .api import chat, health
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """管理应用生命周期：启动时创建AsyncSqliteSaver，关闭时清理"""
+    """管理应用生命周期：启动时创建Agent和AsyncSqliteSaver，关闭时清理"""
     # 启动时：创建AsyncSqliteSaver并存储到app.state
     async with AsyncSqliteSaver.from_conn_string("./data/checkpoints.db") as checkpointer:
         app.state.checkpointer = checkpointer
         print("[Lifespan] AsyncSqliteSaver已启动，数据库路径: ./data/checkpoints.db")
+
+        # 创建Agent实例
+        from .agent.navigation_agent import create_agent
+        app.state.agent = create_agent(checkpointer=checkpointer)
+        print("[Lifespan] NavigationAgent已启动")
+
         yield  # 应用运行期间
+
         # 关闭时：自动清理（async with会处理）
-        print("[Lifespan] AsyncSqliteSaver已关闭")
+        print("[Lifespan] NavigationAgent和AsyncSqliteSaver已关闭")
 
 
 # 创建 FastAPI 应用

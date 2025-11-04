@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { Message } from '../types/message';
+import { Message, ImageData } from '../types/message';
 
 const API_BASE_URL = 'http://localhost:8000';
 
@@ -47,12 +47,13 @@ const getOrCreateSessionId = (): string => {
       }
     }, [messages, sessionId]);
 
-    const sendMessage = useCallback(async (userMessage: string) => {
+    const sendMessage = useCallback(async (userMessage: string, images?: ImageData[]) => {
       // 添加用户消息
       const userMsg: Message = {
         role: 'user',
         content: userMessage,
         timestamp: new Date(),
+        images,  // 包含图片
       };
       setMessages((prev) => [...prev, userMsg]);
       setIsLoading(true);
@@ -67,6 +68,7 @@ const getOrCreateSessionId = (): string => {
           body: JSON.stringify({
             message: userMessage,
             thread_id: sessionId,  // 使用持久化的 session ID
+            images,  // 发送图片到后端
           }),
         });
 
@@ -81,7 +83,96 @@ const getOrCreateSessionId = (): string => {
           throw new Error('Response body is null');
         }
 
-        let assistantContent = '';
+        const nodeMessageIndex = new Map<string, number>();
+        const defaultNodeKey = 'assistant';
+
+        const ensureAssistantMessage = (nodeKey: string, initialContent = '') => {
+          const timestamp = new Date();
+          setMessages((prev) => {
+            const newMessages = [...prev];
+            const existingIndex = nodeMessageIndex.get(nodeKey);
+
+            if (existingIndex === undefined) {
+              newMessages.push({
+                role: 'assistant',
+                content: initialContent,
+                timestamp,
+                node: nodeKey,
+              });
+              nodeMessageIndex.set(nodeKey, newMessages.length - 1);
+            } else {
+              const existing = newMessages[existingIndex];
+              if (!existing) {
+                newMessages.push({
+                  role: 'assistant',
+                  content: initialContent,
+                  timestamp,
+                  node: nodeKey,
+                });
+                nodeMessageIndex.set(nodeKey, newMessages.length - 1);
+              }
+            }
+
+            return newMessages;
+          });
+        };
+
+        const appendToAssistantMessage = (nodeKey: string, fragment: string) => {
+          if (!fragment) return;
+          const timestamp = new Date();
+          setMessages((prev) => {
+            const newMessages = [...prev];
+            let index = nodeMessageIndex.get(nodeKey);
+
+            if (index === undefined) {
+              newMessages.push({
+                role: 'assistant',
+                content: fragment,
+                timestamp,
+                node: nodeKey,
+              });
+              index = newMessages.length - 1;
+              nodeMessageIndex.set(nodeKey, index);
+            } else {
+              const updated = {
+                ...newMessages[index],
+                content: `${newMessages[index].content || ''}${fragment}`,
+                timestamp,
+              };
+              newMessages[index] = updated;
+            }
+
+            return newMessages;
+          });
+        };
+
+        const replaceAssistantMessage = (nodeKey: string, content: string) => {
+          const timestamp = new Date();
+          setMessages((prev) => {
+            const newMessages = [...prev];
+            let index = nodeMessageIndex.get(nodeKey);
+
+            if (index === undefined) {
+              newMessages.push({
+                role: 'assistant',
+                content,
+                timestamp,
+                node: nodeKey,
+              });
+              index = newMessages.length - 1;
+              nodeMessageIndex.set(nodeKey, index);
+            } else {
+              const updated = {
+                ...newMessages[index],
+                content,
+                timestamp,
+              };
+              newMessages[index] = updated;
+            }
+
+            return newMessages;
+          });
+        };
 
         while (true) {
           const { done, value } = await reader.read();
@@ -91,58 +182,39 @@ const getOrCreateSessionId = (): string => {
           const lines = chunk.split('\n');
 
           for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
-                const data = JSON.parse(line.slice(6));
+            if (!line.startsWith('data: ')) {
+              continue;
+            }
 
-                if (data.type === 'token') {
-                  // 逐字符累积（打字机效果）
-                  assistantContent += data.content;
+            try {
+              const data = JSON.parse(line.slice(6));
+              const nodeKey: string = data.node || defaultNodeKey;
 
-                  setMessages((prev) => {
-                    const newMessages = [...prev];
-                    const lastMsg = newMessages[newMessages.length - 1];
-
-                    if (lastMsg?.role === 'assistant') {
-                      // 更新最后一条 assistant 消息
-                      lastMsg.content = assistantContent;
-                    } else {
-                      // 添加新的 assistant 消息
-                      newMessages.push({
-                        role: 'assistant',
-                        content: assistantContent,
-                        timestamp: new Date(),
-                      });
-                    }
-                    return newMessages;
-                  });
-                } else if (data.type === 'message') {
-                  // 兼容旧的完整消息格式
-                  assistantContent += data.content + '\n\n';
-
-                  setMessages((prev) => {
-                    const newMessages = [...prev];
-                    const lastMsg = newMessages[newMessages.length - 1];
-
-                    if (lastMsg?.role === 'assistant') {
-                      lastMsg.content = assistantContent.trim();
-                    } else {
-                      newMessages.push({
-                        role: 'assistant',
-                        content: assistantContent.trim(),
-                        timestamp: new Date(),
-                      });
-                    }
-                    return newMessages;
-                  });
-                } else if (data.type === 'error') {
+              switch (data.type) {
+                case 'start':
+                  // ignore
+                  break;
+                case 'node_start':
+                  ensureAssistantMessage(nodeKey, '');
+                  break;
+                case 'token':
+                  appendToAssistantMessage(nodeKey, data.content || '');
+                  break;
+                case 'message':
+                  replaceAssistantMessage(nodeKey, (data.content || '').trim());
+                  break;
+                case 'error':
                   setError(data.message || '发生未知错误');
-                } else if (data.type === 'done') {
+                  break;
+                case 'done':
                   setIsLoading(false);
-                }
-              } catch (e) {
-                console.error('Failed to parse SSE data:', e);
+                  break;
+                default:
+                  // 忽略 tool_start / tool_end 等事件
+                  break;
               }
+            } catch (e) {
+              console.error('Failed to parse SSE data:', e);
             }
           }
         }

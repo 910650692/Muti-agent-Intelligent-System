@@ -37,6 +37,7 @@ train_prompt = ChatPromptTemplate.from_messages([
 
 def create_train_agent():
     """创建 Train Agent"""
+    # 注意：USE_VISION_MODEL_ALWAYS=true 时，这里会使用视觉模型
     llm = get_llm()
 
     # 加载12306 MCP工具

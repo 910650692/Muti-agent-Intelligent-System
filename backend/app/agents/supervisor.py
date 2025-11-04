@@ -1,5 +1,6 @@
 """Supervisor Agent: 任务调度和路由"""
 import json
+from typing import Optional
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
@@ -8,99 +9,99 @@ from ..llm import get_llm
 
 # Supervisor 的 Prompt
 supervisor_prompt = ChatPromptTemplate.from_messages([
-    ("system", """你是任务路由专家，负责分析用户需求并协调多个专业 Agent。
+    ("system", """你是多智能体调度员，负责根据对话上下文安排下一步代理。
 
-可用的 Agent:
-- weather: 查询天气信息（天气、温度、降雨、风力等气象相关）**需要城市信息**
-- train: 查询火车票信息（12306车票查询、余票、列车时刻、中转等）**需要出发地、目的地、日期**
-- navigation: 车载导航服务（获取位置、搜索POI、路线规划、启动导航、回家/去公司等）
-- general: 通用对话（知识问答、日常对话、闲聊等）
+可用代理：
+- weather：天气查询
+- train：火车票查询
+- navigation：定位与导航
+- general：通用问答
 
-你的职责：
-1. 分析用户的原始问题和当前对话状态
-2. 判断任务的完成状态
-3. **识别任务依赖关系，按正确顺序执行**
-4. 决定下一步行动
-
-**任务状态判断（核心）**：
-
-状态1️⃣ **complete** - 任务已完成
-- 用户的问题已经得到完整、满意的回答
-- 示例：
-  * 用户问"今天天气" → Agent返回"上海今天25°C晴天" → complete
-  * 用户问"上海到杭州的车票" → Agent返回车次列表 → complete
-
-状态2️⃣ **needs_user_input** - 需要用户补充信息
-- 任务进行中，但需要用户做选择或补充信息才能继续
-- Agent已经提供了部分结果，并明确询问用户
-- 示例：
-  * 用户问"晴天去杭州的车票" → Weather查到3个晴天 → 问用户"您想查哪天？" → needs_user_input
-  * 用户问"上海到杭州" → Train问"出发日期？" → needs_user_input
-  * Agent返回多个选项并询问"您比较倾向于哪个？" → needs_user_input
-
-状态3️⃣ **continue** - 继续执行下一步
-- 任务未完成，但已有足够信息，可以自动继续
-- 无需用户干预，系统可以自主完成下一步
-- 示例：
-  * 用户问"今天天气" → Navigation获取位置"上海" → continue → Weather查询天气
-  * 用户问"晴天去杭州" → Weather查到"明天晴" → continue → Train查明天车票
-
-**关键判断逻辑**：
-
-判断是 **continue** 还是 **needs_user_input**？
-- ✅ continue: Agent只是提供了中间数据（如位置），没有询问用户，可以自动进行下一步
-- ✅ needs_user_input: Agent提供了选项/结果，并明确询问用户选择或补充信息
-
-判断是 **complete** 还是 **needs_user_input**？
-- ✅ complete: Agent回答了用户的完整问题，没有遗留疑问
-- ✅ needs_user_input: Agent的回复以问句结尾，或列出选项等待用户选择
-
-**依赖关系处理（关键！）**：
-- 如果任务需要多个Agent且有依赖关系 → **先执行前置Agent**，状态设为continue
-- 如果任务需要多个Agent且无依赖关系 → 可以并行执行（next_agents包含多个）
-
-**常见依赖关系**：
-1. **天气查询需要位置**：
-   - 用户问"今天天气" 且 对话历史中**没有**Navigation返回的位置 → 先调用navigation获取位置（status=continue）
-   - 对话历史中**有**Navigation返回的位置，但**没有**Weather返回的天气数据 → 调用weather查询天气（status=continue）
-   - 对话历史中**已有**Weather返回的完整天气信息（温度、湿度、天气状况等） → 任务完成（status=complete）
-
-2. **火车票查询需要日期**：
-   - 用户问"晴天去杭州的车票" → 先调用weather查询晴天日期（status=continue）
-   - Weather返回晴天日期 → 调用train查询车票（status=continue）
-   - 如果有多个晴天 → 询问用户选择（status=needs_user_input）
-
-**判断当前缺少什么信息**：
-- **仔细检查对话历史**中最近的AI回复内容
-- 如果用户问"今天天气"：
-  * 检查是否有包含"温度"、"°C"、"天气"、"晴"、"雨"等关键词的AI回复
-  * 如果**有**这些关键词 → 天气已查询完成（status=complete）
-  * 如果**没有**天气数据，但有"位置"、"上海"、"北京"等城市信息 → 调用weather（status=continue）
-  * 如果**既没有**天气数据也没有位置 → 调用navigation（status=continue）
-
-**路由规则：**
-- 火车票、车次、12306、高铁、动车、列车等 → train
-- 天气、温度、降雨、气象、晴天、下雨等 → weather
-- 导航、位置、POI、搜索地点、回家、去公司、路线、目的地、附近的、加油站、充电站、停车场等 → navigation
-- 其他通用问题 → general
-- **多个独立需求 → 返回多个agents（并行执行）**
-
-返回 JSON 格式:
+输出 JSON：
 {{
-    "next_agents": ["agent1", "agent2"],  // 下一步要调用的Agent（可以为空）
-    "status": "complete",                  // complete / needs_user_input / continue
-    "reason": "原因说明"
+  "status": "complete | continue | needs_user_input",
+  "next_agents": ["agent_name", ...],
+  "reason": "简短中文说明"
 }}
 
-注意:
-- **仔细分析对话历史**，理解用户的原始问题和当前进度
-- **区分"Agent完成子任务"和"整体任务完成"**
-- 如果status是complete或needs_user_input，next_agents应该为空
-- 如果status是continue，next_agents必须包含至少一个Agent
+当 status 不是 "continue" 时，next_agents 必须为空；当 status 为 "continue" 时，按顺序列出需要执行的代理名称，可包含多个。
 """),
     MessagesPlaceholder(variable_name="chat_history"),
     ("human", "{input}"),
 ])
+
+
+def _extract_text(message: Optional[AIMessage]) -> str:
+    """Safely extract string content from an AI message."""
+    if message is None:
+        return ""
+
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content.strip()
+
+    # 对于其他类型（如列表多模态内容）统一转为字符串
+    return str(content).strip()
+
+
+def _classify_last_ai_message(message: Optional[AIMessage]) -> Optional[str]:
+    """根据最后一条AI消息内容判断任务状态."""
+    text = _extract_text(message)
+    if not text:
+        return None
+
+    question_suffixes = ("?", "？")
+    user_input_hints = (
+        "请提供", "需要您", "告诉我", "麻烦提供", "请选择", "想了解哪",
+        "您希望我", "请问", "还想查询", "需要更多", "方便告知", "哪一天", "哪个时间",
+    )
+    error_hints = (
+        "无法", "不可用", "失败", "未能", "出错", "错误", "很遗憾",
+        "暂时不能", "暂时无法", "暂时不可用", "暂未", "没有找到", "未找到",
+    )
+    intermediate_hints = (
+        "当前位置", "当前定位", "定位到", "位置：", "位置:", "经度", "纬度", "坐标",
+        "正在为您查询", "正在查询", "继续为您", "正在获取", "正在处理", "处理中",
+        "等待片刻", "稍等片刻", "马上为您", "准备查询", "正在搜索", "下一步", "继续处理",
+        "继续为您办理", "已获取位置信息", "保持连接",
+    )
+    navigation_done_hints = (
+        "导航已启动", "开始导航", "路线已经规划", "已为您规划路线", "已为您开始导航",
+        "导航已经开始", "导航已为您启动",
+    )
+    weather_answer_hints = (
+        "天气", "气温", "温度", "°", "℃", "摄氏度", "相对湿度", "风力", "风速",
+        "降雨", "降水", "晴", "多云", "小雨", "阴", "空气质量", "紫外线",
+    )
+    train_answer_hints = (
+        "车次", "列车", "余票", "发车", "到达", "票价", "硬座", "软卧", "二等座",
+        "一等座", "商务座", "候补", "直达", "中转",
+    )
+
+    # 需要用户补充信息
+    if text.endswith(question_suffixes):
+        return "needs_user_input"
+    if any(hint in text for hint in user_input_hints):
+        return "needs_user_input"
+    if any(hint in text for hint in error_hints):
+        return "needs_user_input"
+
+    # 中间步骤信息，继续执行
+    if any(hint in text for hint in intermediate_hints):
+        return "continue"
+    if text.startswith("正在") or text.startswith("稍等"):
+        return "continue"
+
+    # 领域特定的完成信号
+    if any(hint in text for hint in navigation_done_hints):
+        return "complete"
+    if any(hint in text for hint in weather_answer_hints):
+        return "complete"
+    if any(hint in text for hint in train_answer_hints):
+        return "complete"
+
+    # 默认视为完成，避免重复调用
+    return "complete"
 
 
 def supervisor_agent(state: AgentState) -> AgentState:
@@ -124,7 +125,15 @@ def supervisor_agent(state: AgentState) -> AgentState:
     last_user_message = None
     for msg in reversed(messages):
         if isinstance(msg, HumanMessage):
-            last_user_message = msg.content
+            # 支持多模态消息：如果content是列表，提取文本部分
+            if isinstance(msg.content, str):
+                last_user_message = msg.content
+            elif isinstance(msg.content, list):
+                # 提取所有文本部分
+                text_parts = [item.get("text", "") for item in msg.content if isinstance(item, dict) and item.get("type") == "text"]
+                last_user_message = " ".join(text_parts) if text_parts else "用户发送了图片"
+            else:
+                last_user_message = str(msg.content)
             break
 
     if not last_user_message:
@@ -136,27 +145,124 @@ def supervisor_agent(state: AgentState) -> AgentState:
         }
 
     # 获取对话历史（最近10条，排除 Supervisor 的消息）
+    # 注意：需要将多模态消息转换为纯文本，因为Supervisor使用DeepSeek（不支持image_url）
     chat_history = []
     for msg in messages[-10:]:
-        if isinstance(msg, AIMessage) and msg.content.startswith("[Supervisor]"):
+        if isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content.startswith("[Supervisor]"):
             continue
-        chat_history.append(msg)
+
+        # 将多模态消息转换为纯文本消息（DeepSeek不支持image_url）
+        if isinstance(msg.content, list):
+            # 提取文本部分
+            text_parts = [item.get("text", "") for item in msg.content if isinstance(item, dict) and item.get("type") == "text"]
+            text_content = " ".join(text_parts) if text_parts else "[用户发送了图片]"
+
+            # 创建纯文本消息
+            if isinstance(msg, HumanMessage):
+                chat_history.append(HumanMessage(content=text_content))
+            else:
+                chat_history.append(AIMessage(content=text_content))
+        else:
+            chat_history.append(msg)
 
     # 调试：打印Supervisor看到的对话历史
     print(f"[Supervisor DEBUG] 对话历史 (共{len(chat_history)}条):")
     for i, msg in enumerate(chat_history[-5:]):  # 只打印最后5条
         msg_type = "User" if isinstance(msg, HumanMessage) else "AI"
-        content_preview = msg.content[:100].replace("\n", " ")
+
+        # 安全地提取内容预览（支持多模态消息）
+        if isinstance(msg.content, str):
+            content_preview = msg.content[:100].replace("\n", " ")
+        elif isinstance(msg.content, list):
+            # 多模态消息，只提取文本部分
+            text_parts = [item.get("text", "") for item in msg.content if isinstance(item, dict) and item.get("type") == "text"]
+            content_preview = " ".join(text_parts)[:100].replace("\n", " ") if text_parts else "[包含图片]"
+        else:
+            content_preview = str(msg.content)[:100]
+
         print(f"  [{i}] {msg_type}: {content_preview}...")
 
-    # 使用 LLM 进行路由决策
-    llm = get_llm()
+    latest_user_idx = max(
+        (idx for idx, msg in enumerate(chat_history) if isinstance(msg, HumanMessage)),
+        default=-1,
+    )
 
+    last_ai_message = None
+    last_ai_index = -1
+    for idx in range(len(chat_history) - 1, latest_user_idx, -1):
+        candidate = chat_history[idx]
+        if isinstance(candidate, AIMessage):
+            last_ai_message = candidate
+            last_ai_index = idx
+            break
+
+    last_ai_status = _classify_last_ai_message(last_ai_message) if last_ai_message else None
+    last_ai_text = _extract_text(last_ai_message)
+    has_ai_message = last_ai_message is not None
+    has_substantive_reply = last_ai_status == "complete"
+
+    if last_ai_message:
+        print(f"[Supervisor DEBUG] 最后一条AI消息索引: {last_ai_index} | 分类: {last_ai_status} | 内容: {last_ai_text[:80]}")
+    else:
+        print("[Supervisor DEBUG] 未检测到最新用户提问后的AI回复")
+
+    # 如果Agent明确向用户提问，则等待用户输入
+    if last_ai_status == "needs_user_input":
+        print("[Supervisor] 检测到agent正在向用户询问信息，切换为 needs_user_input")
+        return {
+            "messages": [AIMessage(content="[Supervisor] 等待用户补充信息")],
+            "next_agents": [],
+            "iteration_count": 0,
+        }
+
+    # 如果Agent已经给出有效回复，则直接结束，避免重复路由
+    if last_ai_status == "complete" and iteration_count > 0:
+        print("[Supervisor] 检测到有效AI回复，直接complete以避免重复调用")
+        return {
+            "messages": [AIMessage(content="[Supervisor] 任务已完成（检测到有效回复）")],
+            "next_agents": [],
+            "iteration_count": 0,
+        }
+
+    # ✅ 保护机制2：防止无限循环 - 如果已经执行过2次且有实质性回复，强制结束
+    if iteration_count >= 2 and has_substantive_reply:
+        print(f"[Supervisor] ⚠️ 保护机制触发：已循环{iteration_count}次且有AI回复，强制complete")
+        return {
+            "messages": [AIMessage(content="[Supervisor] 任务已完成（循环保护）")],
+            "next_agents": [],
+            "iteration_count": 0,
+        }
+
+    # ✅ 保护机制3：检查completed_tasks，如果同类任务已完成，不再重复
+    task_types_done = set(completed_tasks)
+    print(f"[Supervisor] 已完成任务类型: {task_types_done}")
+
+    # ✅ 保护机制4：如果是通用对话类型且已有回复，直接complete
+    is_general_query = not any(
+        keyword in last_user_message
+        for keyword in ["天气", "weather", "火车", "车票", "12306", "导航", "位置", "回家", "去公司"]
+    )
+    if is_general_query and has_substantive_reply:
+        print(f"[Supervisor] ⚠️ 保护机制触发：通用对话已有回复，强制complete")
+        return {
+            "messages": [AIMessage(content="[Supervisor] 通用对话已完成")],
+            "next_agents": [],
+            "iteration_count": 0,
+        }
+
+    # ✅ 保护机制5：防止LLM幻觉 - 如果没有AI回复却返回complete，强制纠正
+    # 这是最关键的保护！防止LLM在第一次就错误地判断complete
+    # 使用 LLM 进行路由决策
+    # 注意：Supervisor强制使用文本模型（DeepSeek更擅长JSON输出，且不需要看图片）
+    llm = get_llm(force_text=True)
+
+    response = None
     try:
-        response = llm.invoke(supervisor_prompt.format_messages(
+        formatted_messages = supervisor_prompt.format_messages(
             chat_history=chat_history,
             input=last_user_message
-        ))
+        )
+        response = llm.invoke(formatted_messages)
 
         # 清理LLM响应中的markdown代码块标记
         content = response.content.strip()
@@ -178,6 +284,18 @@ def supervisor_agent(state: AgentState) -> AgentState:
         print(f"  - next_agents: {next_agents}")
         print(f"  - status: {status}")
         print(f"  - reason: {reason}")
+
+        # ✅ 关键保护：验证LLM的complete判断
+        # 如果LLM说complete，但对话历史中没有AI回复，这是幻觉，必须纠正！
+        if status == "complete" and not has_substantive_reply:
+            print(f"[Supervisor] ⚠️ LLM幻觉检测：LLM判断complete但无AI回复，强制continue")
+            print(f"[Supervisor] LLM的理由: {reason}")
+            # 强制调用general agent
+            return {
+                "messages": [AIMessage(content=f"[Supervisor] 路由到: general（纠正LLM幻觉）")],
+                "next_agents": ["general"],
+                "iteration_count": iteration_count + 1,
+            }
 
         # 根据状态决定下一步
         if status == "complete" or status == "needs_user_input":
@@ -216,22 +334,22 @@ def supervisor_agent(state: AgentState) -> AgentState:
     except (json.JSONDecodeError, KeyError) as e:
         # 如果 LLM 返回格式不对，降级到关键词匹配
         print(f"[Supervisor] LLM 路由失败，降级到关键词匹配: {e}")
-        print(f"[Supervisor] LLM 响应: {response.content[:200]}")
+        if response is not None and isinstance(getattr(response, "content", ""), str):
+            print(f"[Supervisor] LLM 响应: {response.content[:200]}")
 
         # 关键词匹配（保守策略：只返回单个agent）
         weather_keywords = ["天气", "weather", "温度", "明天", "后天", "今天", "降雨", "下雨", "冷", "热", "风"]
         train_keywords = ["火车", "车票", "高铁", "动车", "列车", "12306", "余票", "车次"]
         navigation_keywords = ["导航", "位置", "poi", "搜索", "回家", "去公司", "路线", "目的地", "附近", "加油站", "充电站", "停车场"]
 
-        # 检查是否是第一次路由（没有AI回复）
-        has_ai_response = any(isinstance(msg, AIMessage) and not msg.content.startswith("[Supervisor]") for msg in messages)
-
         if any(keyword in last_user_message for keyword in train_keywords):
             next_agents = ["train"]
         elif any(keyword in last_user_message for keyword in weather_keywords):
             # 如果是天气查询且没有收到过AI回复，先获取位置
-            if not has_ai_response:
+            if not has_ai_message:
                 next_agents = ["navigation"]
+            elif last_ai_status == "continue":
+                next_agents = ["weather"]
             else:
                 next_agents = ["weather"]
         elif any(keyword in last_user_message for keyword in navigation_keywords):

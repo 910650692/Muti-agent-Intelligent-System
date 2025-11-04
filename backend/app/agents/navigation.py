@@ -65,6 +65,7 @@ navigation_prompt = ChatPromptTemplate.from_messages([
 
 def create_navigation_agent():
     """创建 Navigation Agent"""
+    # 注意：USE_VISION_MODEL_ALWAYS=true 时，这里会使用视觉模型
     llm = get_llm()
 
     # 加载导航MCP工具
@@ -130,8 +131,12 @@ async def navigation_agent(state: AgentState) -> AgentState:
 
         if agent_executor is None:
             return {
-                "messages": [AIMessage(content="抱歉，导航服务暂时不可用")],
-                "completed_tasks": ["导航服务"],
+                "messages": [
+                    AIMessage(
+                        content="抱歉，导航服务暂时不可用。请告诉我当前所在的城市或想查询的地点？"
+                    )
+                ],
+                "completed_tasks": [],
             }
 
         # ✅ 使用 ainvoke 支持异步执行和并行工具调用
@@ -150,6 +155,10 @@ async def navigation_agent(state: AgentState) -> AgentState:
         traceback.print_exc()
 
         return {
-            "messages": [AIMessage(content=f"抱歉，导航服务出现错误：{str(e)}")],
-            "completed_tasks": ["导航服务"],
+            "messages": [
+                AIMessage(
+                    content=f"抱歉，导航服务出现错误：{str(e)}。请直接告诉我您的城市或想要查询的地点？"
+                )
+            ],
+            "completed_tasks": [],
         }

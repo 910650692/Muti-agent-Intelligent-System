@@ -78,6 +78,8 @@ weather_prompt = ChatPromptTemplate.from_messages([
 
 def create_weather_agent():
     """创建 Weather Agent"""
+    # 注意：USE_VISION_MODEL_ALWAYS=true 时，这里会使用视觉模型
+    # 如果需要根据消息动态选择，应在agent调用时处理
     llm = get_llm()
     agent = create_tool_calling_agent(llm, weather_tools, weather_prompt)
     return AgentExecutor(agent=agent, tools=weather_tools, verbose=True)
@@ -127,8 +129,19 @@ async def weather_agent(state: AgentState) -> AgentState:
         "messages": cleaned_messages,  # ✅ 传递清理后的消息
     })
 
+    output_text = result.get("output", "")
+    intermediate_steps = result.get("intermediate_steps") or []
+
+    # 仅在成功调用工具并返回结果时标记任务完成
+    completed_tasks = []
+    if intermediate_steps:
+        completed_tasks = ["天气查询"]
+    else:
+        # 如果LLM没有调用工具，通常是在询问城市等补充信息
+        print("[Weather Agent] 未触发工具调用，等待用户补充位置信息")
+
     return {
-        "messages": [AIMessage(content=result["output"])],
-        "completed_tasks": ["天气查询"],  # ✅ 只返回新增任务，operator.add会自动合并
+        "messages": [AIMessage(content=output_text)],
+        "completed_tasks": completed_tasks,
         # ✅ 不返回next_agent和thread_id，避免并行冲突
     }

@@ -88,7 +88,7 @@ general_prompt_no_tools = ChatPromptTemplate.from_messages([
 
 def create_general_agent():
     """创建配备工具的 General Agent"""
-    llm = get_llm()
+    llm = get_llm()  # 注意：这里暂时不传messages，因为是在创建agent时调用，后续会在ainvoke时动态处理
 
     # 加载所有工具
     all_tools = []
@@ -176,7 +176,7 @@ async def general_agent(state: AgentState) -> AgentState:
         # 如果没有工具，直接使用 LLM
         if agent_executor is None:
             print("[General Agent] 使用普通 LLM 模式（无 MCP 工具）")
-            llm = get_llm()
+            llm = get_llm(messages=cleaned_messages)  # ✅ 传递messages参数以支持多模态
 
             response = await llm.ainvoke(general_prompt_no_tools.format_messages(messages=cleaned_messages))
             final_output = response.content
@@ -202,7 +202,7 @@ async def general_agent(state: AgentState) -> AgentState:
 
         # 降级处理：直接使用 LLM 回答
         print("[General Agent] 降级到直接 LLM 回答")
-        llm = get_llm()
+        llm = get_llm(messages=cleaned_messages)  # ✅ 传递messages参数以支持多模态
         response = await llm.ainvoke(cleaned_messages)
 
         return {

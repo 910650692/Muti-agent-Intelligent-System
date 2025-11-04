@@ -19,9 +19,28 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
               : 'bg-gray-200 text-gray-800'
           }`}
         >
-          <div className="whitespace-pre-wrap break-words">
-            {message.content}
-          </div>
+          {/* 显示图片（如果有） */}
+          {message.images && message.images.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-2">
+              {message.images.map((img, index) => (
+                <img
+                  key={index}
+                  src={img.data}
+                  alt={`image-${index}`}
+                  className="max-w-full max-h-60 rounded border"
+                />
+              ))}
+            </div>
+          )}
+
+          {/* 显示文本内容 */}
+          {message.content && (
+            <div className="whitespace-pre-wrap break-words">
+              {message.content}
+            </div>
+          )}
+
+          {/* 时间戳 */}
           <div
             className={`text-xs mt-1 ${
               isUser ? 'text-blue-100' : 'text-gray-500'
