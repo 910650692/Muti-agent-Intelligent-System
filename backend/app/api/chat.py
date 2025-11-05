@@ -298,6 +298,9 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
                     if node_from_tags == current_node:
                         output_payload = event.get("data", {}).get("output")
 
+                        # 标记是否有内容输出（用于判断是否发送node_end）
+                        has_content = bool(current_message.strip())
+
                         # 如果没有实时token输出，尝试从节点输出中提取文本一次性发送
                         if not current_message.strip():
                             sent_texts = node_sent_texts.setdefault(node_from_tags, set())
@@ -309,9 +312,12 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
                                     continue
                                 sent_texts.add(cleaned)
                                 yield f"data: {json.dumps({'type': 'message', 'content': cleaned, 'node': node_from_tags}, ensure_ascii=False)}\n\n"
+                                has_content = True  # 标记已发送内容
 
-                        # 发送节点完成事件
-                        yield f"data: {json.dumps({'type': 'node_end', 'node': current_node}, ensure_ascii=False)}\n\n"
+                        # ✅ 只有当节点有内容输出时才发送node_end（避免action节点产生空消息）
+                        if has_content:
+                            yield f"data: {json.dumps({'type': 'node_end', 'node': current_node}, ensure_ascii=False)}\n\n"
+
                         current_message = ""
 
             # 发送完成事件

@@ -44,15 +44,11 @@ class NavigationAgent:
         """加载所有工具"""
         tools = []
 
-        # 1. 加载导航MCP工具
-        print("[NavigationAgent] 正在加载MCP导航工具...")
+        # 1. 加载MCP工具
+        print("[NavigationAgent] 正在加载MCP工具...")
         mcp_tools = mcp_manager.load_all_tools()
-        navigation_mcp_tools = [
-            tool for tool in mcp_tools
-            if "sgm-navigation" in tool.name.lower() or "navi" in tool.name.lower()
-        ]
-        tools.extend(navigation_mcp_tools)
-        print(f"[NavigationAgent] 加载了 {len(navigation_mcp_tools)} 个MCP工具")
+        tools.extend(mcp_tools)
+        print(f"[NavigationAgent] 加载了 {len(mcp_tools)} 个MCP工具")
 
         # 2. 加载天气工具
         tools.extend(weather_tools)
@@ -62,6 +58,66 @@ class NavigationAgent:
         # tools.extend(search_tools)
 
         return tools
+
+    @staticmethod
+    def _sanitize_messages_for_text_model(messages: List[BaseMessage]) -> List[BaseMessage]:
+        """
+        清理消息列表，将图片替换为占位符，供文本模型使用
+
+        目的：
+        - DeepSeek等文本模型不支持 image_url 格式，会报400错误
+        - 但我们需要保留上下文，让文本模型知道"这里曾经有图片"
+
+        策略：
+        - 将 {"type": "image_url", ...} 替换为占位符 "[用户发送了图片]"
+        - 保留所有文本内容
+        - 保留消息结构和顺序
+
+        Args:
+            messages: 原始消息列表（可能包含图片）
+
+        Returns:
+            清理后的消息列表（纯文本 + 占位符）
+        """
+        cleaned = []
+
+        for msg in messages:
+            # 检查消息内容格式
+            if hasattr(msg, 'content') and isinstance(msg.content, list):
+                # 多模态格式（列表），需要提取文本并添加占位符
+                texts = []
+                has_image = False
+
+                for item in msg.content:
+                    if isinstance(item, dict):
+                        if item.get('type') == 'text':
+                            # 保留文本内容
+                            texts.append(item.get('text', ''))
+                        elif item.get('type') in ['image_url', 'image']:
+                            # 检测到图片
+                            has_image = True
+
+                # 重建消息内容：占位符 + 文本
+                text_content = ' '.join(texts).strip()
+                if has_image:
+                    # 在文本前添加占位符
+                    text_content = "[用户发送了图片] " + text_content
+
+                # 创建新消息（保持原消息类型）
+                if text_content:
+                    # ⚠️ 关键修复：如果原始消息包含 tool_calls，需要保留
+                    # 否则会导致消息序列不合法（ToolMessage 前必须有对应的 tool_calls）
+                    if isinstance(msg, AIMessage) and hasattr(msg, 'tool_calls') and msg.tool_calls:
+                        new_msg = AIMessage(content=text_content, tool_calls=msg.tool_calls)
+                    else:
+                        new_msg = msg.__class__(content=text_content)
+                    cleaned.append(new_msg)
+
+            else:
+                # 纯文本消息或其他格式，直接保留
+                cleaned.append(msg)
+
+        return cleaned
 
     def _build_graph(self):
         """构建ReAct工作流
@@ -99,6 +155,12 @@ class NavigationAgent:
     async def call_model(self, state: AgentState, config: RunnableConfig | None = None) -> dict:
         """推理节点：LLM分析和决策
 
+        支持两种模式：
+        1. 单阶段推理（纯文本）：文本模型+工具
+        2. 两阶段推理（多模态）：
+           - 阶段1: VL模型理解图片
+           - 阶段2: 文本模型基于理解结果调用工具
+
         Args:
             state: 当前状态
             config: 运行配置
@@ -111,45 +173,195 @@ class NavigationAgent:
         print(f"\n[Reasoning] 开始推理，当前消息数: {len(messages)}")
 
         # ✅ 智能选择LLM（自动检测是否有图片）
-        from ..llm import has_image_content
-        is_multimodal = has_image_content(messages)
-        llm = get_llm(messages=messages)
+        from ..llm import has_image_content, _extract_text_from_message, _check_message_has_image
 
-        # ✅ 关键修复：视觉模型不绑定工具（可能不支持function calling）
-        if is_multimodal:
-            print("[Reasoning] 检测到图片，使用纯视觉模型（不绑定工具）")
-            model_with_tools = llm  # 不绑定工具
+        # 判断是否需要多模态推理
+        # 条件：最新消息是 HumanMessage 且包含图片
+        # 排除：ReAct循环中的 ToolMessage（工具返回结果后的推理）
+        latest_message = messages[-1] if messages else None
+        is_latest_human_with_image = (
+            latest_message and
+            hasattr(latest_message, 'type') and
+            latest_message.type == 'human' and
+            _check_message_has_image(latest_message)
+        )
+
+        # ==================== 两阶段推理（多模态场景） ====================
+        if is_latest_human_with_image:
+            print("[Reasoning] 🔄 启动智能两阶段推理")
+
+            # === 阶段1: 视觉理解 + 意图判断 ===
+            print("[Reasoning] 📷 阶段1: 使用VL模型理解图片并判断意图")
+            vl_model = get_llm(messages=messages, force_vision=True)
+
+            # 增强的System Prompt：让VL模型自主判断是否需要工具
+            vision_system_prompt = """你是一个智能视觉助手。请分析图片内容并理解用户需求。
+
+**任务：**
+1. 详细描述图片中的内容（包括文字、物体、场景等关键信息）
+2. 理解用户的真实意图
+
+**意图判断：**
+- 如果用户只是想了解图片内容（如"这是什么"、"识别一下"、"有几个"等），直接回答即可
+- 如果用户需要执行具体操作（如"导航到这里"、"查询信息"、"帮我订票"、"搜索附近"等），请在回答最后添加标记：[NEED_TOOLS]
+
+**示例：**
+用户："这是什么？" → 回答："这是两只可爱的小猫咪"（不加标记）
+用户："导航到这里" → 回答："这是延安高架虹桥枢纽出口 [NEED_TOOLS]"（添加标记）
+用户："帮我查附近加油站" → 回答："图片显示当前位置在市中心区域 [NEED_TOOLS]"（添加标记）
+"""
+
+            # 构建视觉理解的消息（包含图片）
+            vision_messages = [
+                SystemMessage(content=vision_system_prompt),
+                *messages
+            ]
+
+            # VL模型推理（不绑定工具）
+            vision_chunk = None
+            async for chunk in vl_model.astream(vision_messages, config=config):
+                vision_chunk = chunk if vision_chunk is None else (vision_chunk + chunk)
+
+            if vision_chunk is None:
+                print("[Reasoning] ⚠️ 阶段1失败：VL模型未返回内容")
+                return {
+                    "messages": [AIMessage(content="抱歉，无法识别图片内容，请重新上传。")]
+                }
+
+            vision_understanding = getattr(vision_chunk, "content", "") or ""
+            print(f"[Reasoning] ✅ 阶段1完成，图片理解: {vision_understanding[:100]}...")
+
+            # 检测是否需要进入阶段2（多种检测方式）
+            TOOL_MARKER = "[NEED_TOOLS]"
+            # ✅ 增强检测：不仅检查标记，还检查是否包含工具调用相关关键词
+            TOOL_KEYWORDS = ["<tool_call>", "tool_call", "规划路线", "搜索", "查询", "订票", "导航"]
+            needs_tools = (
+                TOOL_MARKER in vision_understanding or
+                any(keyword in vision_understanding for keyword in TOOL_KEYWORDS)
+            )
+
+            if not needs_tools:
+                # 纯图片问答，直接返回VL模型的回答
+                print("[Reasoning] 💬 判断：纯图片问答，无需工具，直接返回")
+                content = vision_understanding
+                tool_calls = None
+            else:
+                # 需要工具，进入阶段2
+                print("[Reasoning] 🛠️  判断：需要执行操作，进入阶段2")
+
+                # 去掉工具相关标记和标签，保留纯净的理解结果
+                import re
+                vision_understanding_clean = vision_understanding.replace(TOOL_MARKER, "")
+                # 去掉 <tool_call>...</tool_call> 标签
+                vision_understanding_clean = re.sub(r'<tool_call>.*?</tool_call>', '', vision_understanding_clean, flags=re.DOTALL)
+                vision_understanding_clean = vision_understanding_clean.strip()
+                print(f"[Reasoning] 清理后的理解: {vision_understanding_clean[:100]}...")
+
+                # === 阶段2: 任务执行（文本模型+工具） ===
+                print("[Reasoning] 🛠️  阶段2: 使用文本模型+工具执行任务")
+                text_model = get_llm(force_text=True)
+                model_with_tools = text_model.bind_tools(self.tools)
+
+                # 提取最新用户消息的文本部分（用户的原始问题）
+                latest_user_text = ""
+                for msg in reversed(messages):
+                    if hasattr(msg, 'type') and msg.type == 'human':
+                        latest_user_text = _extract_text_from_message(msg)
+                        break
+
+                # 构建第二阶段的消息：历史（清理图片）+ 图片理解结果 + 用户问题
+                # 清理历史消息中的图片
+                cleaned_history = self._sanitize_messages_for_text_model(messages[:-1]) if len(messages) > 1 else []
+
+                # 组合消息：图片理解 + 用户需求（使用清理后的理解结果）
+                enhanced_message = f"""[图片内容理解]
+{vision_understanding_clean}
+
+[用户需求]
+{latest_user_text if latest_user_text else "请根据图片内容提供帮助"}"""
+
+                task_messages = [
+                    SystemMessage(content=self.system_prompt),
+                    *cleaned_history,
+                    HumanMessage(content=enhanced_message)
+                ]
+
+                # 文本模型推理（绑定工具）
+                task_chunk = None
+                async for chunk in model_with_tools.astream(task_messages, config=config):
+                    task_chunk = chunk if task_chunk is None else (task_chunk + chunk)
+
+                if task_chunk is None:
+                    print("[Reasoning] ⚠️ 阶段2失败：文本模型未返回内容")
+                    return {
+                        "messages": [AIMessage(content=vision_understanding_clean)]
+                    }
+
+                # 提取最终结果
+                content = getattr(task_chunk, "content", "") or ""
+                tool_calls = getattr(task_chunk, "tool_calls", None)
+
+                # ✅ 修复空content问题：如果LLM只返回tool_calls没有content，用VL理解填充
+                if not content and tool_calls:
+                    content = vision_understanding_clean
+                    print("[Reasoning] ✅ 阶段2完成（LLM返回空content，使用VL理解文本）")
+                else:
+                    print(f"[Reasoning] ✅ 阶段2完成")
+
+                print(f"[Reasoning DEBUG] 内容长度: {len(content)}")
+                print(f"[Reasoning DEBUG] 内容预览: {content[:100] if content else '(空)'}")
+
+        # ==================== 单阶段推理（纯文本场景） ====================
         else:
-            print("[Reasoning] 纯文本模式，绑定所有工具")
-            model_with_tools = llm.bind_tools(self.tools)
+            print("[Reasoning] 📝 单阶段推理: 纯文本模式")
+            text_model = get_llm(force_text=True)  # ✅ 强制使用文本模型（避免历史图片干扰）
+            model_with_tools = text_model.bind_tools(self.tools)
 
-        # 构建完整的消息（system + history）
-        full_messages = [
-            SystemMessage(content=self.system_prompt),
-            *messages
-        ]
+            # 清理历史消息中的图片（如果有的话）
+            messages_to_send = self._sanitize_messages_for_text_model(messages)
 
-        # 流式推理并收集完整响应
-        merged_chunk = None
-        async for chunk in model_with_tools.astream(full_messages, config=config):
-            merged_chunk = chunk if merged_chunk is None else (merged_chunk + chunk)
+            # 构建完整的消息
+            full_messages = [
+                SystemMessage(content=self.system_prompt),
+                *messages_to_send
+            ]
 
-        if merged_chunk is None:
-            print("[Reasoning] ⚠️ LLM未返回任何内容")
-            return {}
+            # 推理
+            print(f"[Reasoning DEBUG] 发送消息给LLM，消息数: {len(full_messages)}")
+            # 打印消息内容摘要
+            for i, msg in enumerate(full_messages):
+                msg_type = msg.__class__.__name__
+                content_preview = str(msg.content)[:100] if hasattr(msg, 'content') else "N/A"
+                print(f"[Reasoning DEBUG]   [{i}] {msg_type}: {content_preview}...")
 
-        # 构建AI消息
-        content = getattr(merged_chunk, "content", "") or ""
-        tool_calls = getattr(merged_chunk, "tool_calls", None)
+            merged_chunk = None
+            try:
+                async for chunk in model_with_tools.astream(full_messages, config=config):
+                    merged_chunk = chunk if merged_chunk is None else (merged_chunk + chunk)
+                print("[Reasoning DEBUG] LLM流式输出完成")
+            except Exception as e:
+                print(f"[Reasoning] ⚠️ LLM调用异常: {e}")
+                import traceback
+                traceback.print_exc()
+                return {
+                    "messages": [AIMessage(content=f"抱歉，处理请求时出错: {e}")]
+                }
 
-        # 🐛 调试：打印LLM返回的原始内容
-        print(f"[Reasoning DEBUG] LLM返回内容长度: {len(content)}")
-        print(f"[Reasoning DEBUG] 内容预览: {content[:100] if content else '(空)'}")
+            if merged_chunk is None:
+                print("[Reasoning] ⚠️ LLM未返回任何内容")
+                return {}
 
-        # ✅ 如果LLM返回空内容，给出友好提示
+            # 提取结果
+            content = getattr(merged_chunk, "content", "") or ""
+            tool_calls = getattr(merged_chunk, "tool_calls", None)
+
+            print(f"[Reasoning DEBUG] LLM返回内容长度: {len(content)}")
+            print(f"[Reasoning DEBUG] 内容预览: {content[:100] if content else '(空)'}")
+
+        # ==================== 构建AI消息（两种模式共用） ====================
         if not content and not tool_calls:
-            print("[Reasoning] ⚠️ LLM返回空内容，可能是图片格式问题或API错误")
-            content = "抱歉，我无法识别这张图片。请尝试：\n1. 重新上传图片\n2. 确保图片清晰可见\n3. 或者直接描述您的问题"
+            print("[Reasoning] ⚠️ 返回空内容")
+            content = "抱歉，我无法处理这个请求。"
 
         ai_message = AIMessage(
             content=content,
@@ -159,9 +371,9 @@ class NavigationAgent:
         # 打印决策信息
         if tool_calls:
             tool_names = [call["name"] for call in tool_calls]
-            print(f"[Reasoning] 决策: 需要调用 {len(tool_calls)} 个工具: {tool_names}")
+            print(f"[Reasoning] 🎯 决策: 需要调用 {len(tool_calls)} 个工具: {tool_names}")
         else:
-            print(f"[Reasoning] 决策: 直接回答用户")
+            print(f"[Reasoning] 💬 决策: 直接回答用户")
 
         return {"messages": [ai_message]}
 

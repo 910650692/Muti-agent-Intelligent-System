@@ -7,17 +7,16 @@
         "12306-mcp"
       ],
       "description": "12306火车票查询，支持余票查询、过站查询、中转查询",
-      "enabled": false
+      "enabled": true
     },
-    "bing-cn": {
-      "command": "cmd",
-      "args": [
-        "/c",
-        "npx",
-        "bing-cn-mcp"
-      ],
-      "description": "必应中国搜索，支持中文搜索和网页内容获取（无需 API Key）",
-      "enabled": false
+    "jina-mcp-tools": {
+      "command": "npx",
+      "args": ["jina-mcp-tools"],
+      "env": {
+        "JINA_API_KEY": "jina_88847476d14d43b9884a7b8d646dc6bbPfuEzSkx5k31d8UgdXWqztNwAeyQ"
+      },
+        "description": "Jina AI 搜索工具集，提供多种AI功能支持",
+        "enabled": true
     },
     "sgm-navigation": {
       "transport": "sse",

@@ -63,7 +63,7 @@ class SSEMCPClient:
             try:
                 await asyncio.wait_for(self._wait_for_endpoint(), timeout=5.0)
             except asyncio.TimeoutError:
-                raise Exception("等待endpoint事件超时")
+                raise Exception("等待endpoint事件超时（MCP server可能未启动或无响应）")
 
             if not self.session_id:
                 raise Exception("未能获取sessionId")
@@ -102,16 +102,17 @@ class SSEMCPClient:
                 if isinstance(tool, dict):
                     tool_name = tool.get("name", "unknown")
                     tool_desc = tool.get("description", "")
-                    print(f"  - {tool_name}: {tool_desc[:60]}...")
+                    # print(f"  - {tool_name}: {tool_desc[:60]}...")
                 else:
                     print(f"  - {tool}")
 
             yield self
 
         except Exception as e:
-            print(f"[SSE MCP Client] [{self.server_name}] 连接失败: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"[SSE MCP Client] [{self.server_name}] ⚠️  连接失败: {e}")
+            # 仅在调试模式下打印详细错误
+            # import traceback
+            # traceback.print_exc()
             raise
         finally:
             # 取消SSE监听任务
@@ -136,10 +137,10 @@ class SSEMCPClient:
         """
         try:
             async with self.client.stream("GET", url) as response:
-                print(f"[SSE MCP Client] [{self.server_name}] SSE连接已建立: {response.status_code}")
-
                 if response.status_code != 200:
                     raise Exception(f"SSE连接失败: HTTP {response.status_code}")
+
+                print(f"[SSE MCP Client] [{self.server_name}] SSE连接已建立")
 
                 buffer = ""
                 async for chunk in response.aiter_text():
@@ -153,12 +154,18 @@ class SSEMCPClient:
                         await self._handle_sse_event(event_block)
 
         except asyncio.CancelledError:
-            print(f"[SSE MCP Client] [{self.server_name}] SSE监听任务已取消")
+            # 正常取消，不打印日志（避免噪音）
             raise
         except Exception as e:
-            print(f"[SSE MCP Client] [{self.server_name}] SSE监听错误: {e}")
-            import traceback
-            traceback.print_exc()
+            # 只在非预期错误时打印
+            if "502" in str(e) or "连接失败" in str(e):
+                # 常见的服务未启动错误，静默处理
+                pass
+            else:
+                print(f"[SSE MCP Client] [{self.server_name}] SSE监听错误: {e}")
+                # 仅在调试模式下打印详细错误
+                # import traceback
+                # traceback.print_exc()
 
     async def _handle_sse_event(self, event_block: str):
         """

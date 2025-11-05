@@ -1,7 +1,13 @@
 """配置管理"""
 import os
+from pathlib import Path
 from dotenv import load_dotenv
-load_dotenv()
+
+# 显式加载 backend/.env 文件（确保无论从哪个目录启动都能找到）
+env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
+print(f"[Config] 已加载环境变量文件: {env_path.absolute()}")
+print(f"[Config] 文件是否存在: {env_path.exists()}")
 
 
 class Config:
@@ -21,6 +27,14 @@ class Config:
     # False: 根据消息内容自动选择（有图片用视觉模型，纯文本用DeepSeek）
     USE_VISION_MODEL_ALWAYS = os.getenv("USE_VISION_MODEL_ALWAYS", "true").lower() == "true"
 
+    @classmethod
+    def _print_config_debug(cls):
+        """打印关键配置用于调试"""
+        print(f"[Config] USE_VISION_MODEL_ALWAYS 环境变量原始值: {os.getenv('USE_VISION_MODEL_ALWAYS')}")
+        print(f"[Config] USE_VISION_MODEL_ALWAYS 解析后: {cls.USE_VISION_MODEL_ALWAYS}")
+        print(f"[Config] DEEPSEEK_MODEL: {cls.DEEPSEEK_MODEL}")
+        print(f"[Config] SILICONFLOW_VISION_MODEL: {cls.SILICONFLOW_VISION_MODEL}")
+
     # 天气 API
     OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 
@@ -36,3 +50,6 @@ class Config:
 
 
 config = Config()
+
+# 启动时打印配置调试信息
+Config._print_config_debug()

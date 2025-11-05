@@ -4,30 +4,112 @@ from langchain_openai import ChatOpenAI
 from .config import config
 
 
+def _check_message_has_image(msg) -> bool:
+    """
+    检查单条消息是否包含图片
+
+    Args:
+        msg: 单条消息对象
+
+    Returns:
+        bool: 如果消息包含图片返回True
+    """
+    if hasattr(msg, 'content') and isinstance(msg.content, list):
+        for content_item in msg.content:
+            if isinstance(content_item, dict):
+                if content_item.get('type') in ['image_url', 'image']:
+                    return True
+    return False
+
+
+def _extract_text_from_message(msg) -> str:
+    """
+    从消息中提取纯文本内容
+
+    Args:
+        msg: 消息对象
+
+    Returns:
+        str: 提取的文本内容
+    """
+    if hasattr(msg, 'content'):
+        content = msg.content
+        # 如果是字符串，直接返回
+        if isinstance(content, str):
+            return content
+        # 如果是列表（多模态格式），提取text类型的内容
+        if isinstance(content, list):
+            texts = []
+            for item in content:
+                if isinstance(item, dict) and item.get('type') == 'text':
+                    texts.append(item.get('text', ''))
+                elif isinstance(item, str):
+                    texts.append(item)
+            return ' '.join(texts)
+    return ''
+
+
 def has_image_content(messages) -> bool:
     """
-    检测消息列表中是否包含图片内容
+    智能检测是否需要使用视觉模型（方案4：关键词智能检测）
+
+    策略：
+    1. 如果最新用户消息包含图片 → 返回True
+    2. 如果最新用户消息包含图片相关关键词（如"图片"、"照片"、"这张图"）
+       → 检测历史消息中是否有图片
+    3. 否则 → 返回False
+
+    这样可以：
+    - 用户发图片 → 使用VL模型 ✅
+    - 后续问"图片里有几只猫？" → 使用VL模型（关键词触发）✅
+    - 后续问"今天天气怎么样？" → 使用文本模型（无关键词）✅
 
     Args:
         messages: LangChain消息列表
 
     Returns:
-        bool: 如果包含图片返回True，否则返回False
+        bool: 如果需要使用视觉模型返回True
     """
     if not messages:
         return False
 
-    for msg in messages:
-        # 检查消息内容是否为列表格式（多模态格式）
-        if hasattr(msg, 'content') and isinstance(msg.content, list):
-            for content_item in msg.content:
-                if isinstance(content_item, dict):
-                    # 检查是否有image_url类型的内容
-                    if content_item.get('type') == 'image_url':
-                        return True
-                    # 检查是否有image类型的内容
-                    if content_item.get('type') == 'image':
-                        return True
+    # 图片相关关键词列表
+    IMAGE_KEYWORDS = [
+        # 中文关键词
+        '图片', '照片', '图像', '截图', '图', '画面',
+        '这张', '那张', '上面', '图中', '画中',
+        '这个图', '那个图', '刚才的图', '之前的图',
+        # 英文关键词
+        'image', 'picture', 'photo', 'screenshot',
+        'this image', 'that picture', 'the image', 'the picture'
+    ]
+
+    # 1. 找到最新的用户消息（从后往前找第一条 HumanMessage）
+    latest_user_message = None
+    for msg in reversed(messages):
+        if hasattr(msg, 'type') and msg.type == 'human':
+            latest_user_message = msg
+            break
+
+    if not latest_user_message:
+        return False
+
+    # 2. 检测最新消息是否直接包含图片
+    if _check_message_has_image(latest_user_message):
+        return True
+
+    # 3. 提取最新消息的文本内容
+    latest_text = _extract_text_from_message(latest_user_message).lower()
+
+    # 4. 检测是否包含图片相关关键词
+    has_keyword = any(keyword.lower() in latest_text for keyword in IMAGE_KEYWORDS)
+
+    # 5. 如果有关键词，检测历史消息中是否有图片
+    if has_keyword:
+        for msg in messages:
+            if _check_message_has_image(msg):
+                print(f"[LLM] 检测到图片相关关键词且历史中有图片，使用视觉模型")
+                return True
 
     return False
 
