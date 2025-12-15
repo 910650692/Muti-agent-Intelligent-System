@@ -25,20 +25,24 @@ class NavigationAgent:
     4. 结束：输出最终答案
     """
 
-    def __init__(self, checkpointer=None):
+    def __init__(self, checkpointer=None, memory=None):
         """初始化Agent
 
         Args:
             checkpointer: LangGraph checkpointer实例（如AsyncSqliteSaver），用于保存会话状态
+            memory: Mem0 Memory实例，用于长期记忆管理
         """
         print("[NavigationAgent] 初始化单Agent ReAct架构...")
 
         self.system_prompt = get_system_prompt()
         self.tools = self._load_all_tools()
         self.checkpointer = checkpointer
+        self.memory = memory  # ✅ 保存memory实例
         self.app = self._build_graph()
 
         print(f"[NavigationAgent] 初始化完成，共加载 {len(self.tools)} 个工具")
+        if self.memory:
+            print("[NavigationAgent] ✅ Mem0长期记忆已启用")
 
     def _load_all_tools(self) -> List[BaseTool]:
         """加载所有工具"""
@@ -175,6 +179,72 @@ class NavigationAgent:
         # ✅ 智能选择LLM（自动检测是否有图片）
         from ..llm import has_image_content, _extract_text_from_message, _check_message_has_image
 
+        # ✅ 查询Mem0长期记忆
+        memory_context = ""
+        if self.memory and config:
+            try:
+                user_id = config.get("configurable", {}).get("user_id", "default")
+
+                # 提取最新用户消息
+                latest_query = ""
+                for msg in reversed(messages):
+                    if hasattr(msg, 'type') and msg.type == 'human':
+                        latest_query = _extract_text_from_message(msg)
+                        break
+
+                if latest_query:
+                    # 查询相关记忆（限制5条）
+                    relevant_memories = self.memory.search(
+                        query=latest_query,
+                        user_id=user_id,
+                        limit=5
+                    )
+
+                    # ✅ 调试：打印返回类型
+                    print(f"[Memory DEBUG] 查询返回类型: {type(relevant_memories)}")
+                    print(f"[Memory DEBUG] 查询返回内容: {relevant_memories}")
+
+                    if relevant_memories:
+                        # ✅ 兼容不同的返回格式
+                        memory_facts = []
+
+                        # 如果返回的是 {'results': [...]}
+                        if isinstance(relevant_memories, dict) and 'results' in relevant_memories:
+                            results = relevant_memories['results']
+
+                            for m in results:
+                                if isinstance(m, dict):
+                                    # 尝试多个可能的字段名
+                                    fact = (m.get('memory') or
+                                           m.get('text') or
+                                           m.get('content') or
+                                           m.get('data') or
+                                           str(m))
+                                    if fact and fact != str(m):
+                                        memory_facts.append(fact)
+                                elif isinstance(m, str):
+                                    memory_facts.append(m)
+
+                        # 如果是列表（旧格式兼容）
+                        elif isinstance(relevant_memories, list):
+                            for m in relevant_memories:
+                                if isinstance(m, dict):
+                                    fact = m.get('memory', '') or m.get('text', '') or m.get('content', '')
+                                    if fact:
+                                        memory_facts.append(fact)
+                                elif isinstance(m, str):
+                                    memory_facts.append(m)
+
+                        if memory_facts:
+                            memory_context = "\n".join(f"- {fact}" for fact in memory_facts)
+                            print(f"[Memory] 查询到 {len(memory_facts)} 条相关记忆")
+                        else:
+                            print(f"[Memory] 查询返回空结果（可能没有相关记忆或记忆未保存成功）")
+            except Exception as e:
+                print(f"[Memory] 查询失败（降级为无记忆模式）: {e}")
+                import traceback
+                traceback.print_exc()
+
         # 判断是否需要多模态推理
         # 条件：最新消息是 HumanMessage 且包含图片
         # 排除：ReAct循环中的 ToolMessage（工具返回结果后的推理）
@@ -209,6 +279,15 @@ class NavigationAgent:
 用户："这是什么？" → 回答："这是两只可爱的小猫咪"（不加标记）
 用户："导航到这里" → 回答："这是延安高架虹桥枢纽出口 [NEED_TOOLS]"（添加标记）
 用户："帮我查附近加油站" → 回答："图片显示当前位置在市中心区域 [NEED_TOOLS]"（添加标记）
+"""
+            # ✅ 注入Mem0记忆
+            if memory_context:
+                vision_system_prompt += f"""
+
+**用户长期记忆**：
+{memory_context}
+
+请结合用户的长期记忆提供个性化服务。
 """
 
             # 构建视觉理解的消息（包含图片）
@@ -280,8 +359,19 @@ class NavigationAgent:
 [用户需求]
 {latest_user_text if latest_user_text else "请根据图片内容提供帮助"}"""
 
+                # ✅ 注入Mem0记忆到system prompt
+                enhanced_system_prompt = self.system_prompt
+                if memory_context:
+                    enhanced_system_prompt = f"""{self.system_prompt}
+
+**用户长期记忆**：
+{memory_context}
+
+请结合用户的长期记忆提供个性化服务。
+"""
+
                 task_messages = [
-                    SystemMessage(content=self.system_prompt),
+                    SystemMessage(content=enhanced_system_prompt),
                     *cleaned_history,
                     HumanMessage(content=enhanced_message)
                 ]
@@ -320,9 +410,20 @@ class NavigationAgent:
             # 清理历史消息中的图片（如果有的话）
             messages_to_send = self._sanitize_messages_for_text_model(messages)
 
+            # ✅ 注入Mem0记忆到system prompt
+            enhanced_system_prompt = self.system_prompt
+            if memory_context:
+                enhanced_system_prompt = f"""{self.system_prompt}
+
+**用户长期记忆**：
+{memory_context}
+
+请结合用户的长期记忆提供个性化服务。
+"""
+
             # 构建完整的消息
             full_messages = [
-                SystemMessage(content=self.system_prompt),
+                SystemMessage(content=enhanced_system_prompt),
                 *messages_to_send
             ]
 
@@ -374,6 +475,41 @@ class NavigationAgent:
             print(f"[Reasoning] 🎯 决策: 需要调用 {len(tool_calls)} 个工具: {tool_names}")
         else:
             print(f"[Reasoning] 💬 决策: 直接回答用户")
+
+        # ✅ 保存对话到Mem0（只在有实际内容且无工具调用时保存，避免保存中间状态）
+        if self.memory and config and content and not tool_calls:
+            try:
+                user_id = config.get("configurable", {}).get("user_id", "default")
+
+                # 构建对话上下文（最近2轮）
+                conversation_text = ""
+                recent_messages = messages[-2:] if len(messages) >= 2 else messages
+                for msg in recent_messages:
+                    if hasattr(msg, 'type'):
+                        if msg.type == 'human':
+                            conversation_text += f"User: {_extract_text_from_message(msg)}\n"
+                        elif msg.type == 'ai':
+                            msg_content = getattr(msg, 'content', '')
+                            if isinstance(msg_content, str) and msg_content:
+                                conversation_text += f"Assistant: {msg_content}\n"
+
+                # 添加当前回复
+                conversation_text += f"Assistant: {content}"
+
+                # ✅ 调试：打印保存内容
+                print(f"[Memory DEBUG] 准备保存，user_id={user_id}")
+                print(f"[Memory DEBUG] 对话内容: {conversation_text[:200]}...")
+
+                # 保存到Mem0（Mem0会自动提取事实）
+                result = self.memory.add(
+                    messages=conversation_text,
+                    user_id=user_id,
+                    metadata={"source": "navigation_agent", "timestamp": str(__import__('time').time())}
+                )
+                print(f"[Memory DEBUG] Mem0返回结果: {result}")
+                print(f"[Memory] 已保存对话记忆（user_id={user_id}）")
+            except Exception as e:
+                print(f"[Memory] 保存失败（不影响主流程）: {e}")
 
         return {"messages": [ai_message]}
 
@@ -487,13 +623,14 @@ class NavigationAgent:
             yield event
 
 
-def create_agent(checkpointer=None) -> NavigationAgent:
+def create_agent(checkpointer=None, memory=None) -> NavigationAgent:
     """创建Agent实例
 
     Args:
         checkpointer: LangGraph checkpointer实例
+        memory: Mem0 Memory实例
 
     Returns:
         NavigationAgent实例
     """
-    return NavigationAgent(checkpointer=checkpointer)
+    return NavigationAgent(checkpointer=checkpointer, memory=memory)

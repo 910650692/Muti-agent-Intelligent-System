@@ -23,6 +23,7 @@ class ChatRequest(BaseModel):
     """聊天请求"""
     message: str
     thread_id: str = "default"
+    user_id: str = "default"  # ✅ 新增：用户ID，用于Mem0长期记忆
     images: Optional[List[ImageData]] = Field(default=None, description="图片列表（可选）")
 
 
@@ -191,6 +192,7 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
 
     user_message = chat_request.message
     thread_id = chat_request.thread_id
+    user_id = chat_request.user_id  # ✅ 获取user_id
 
     async def event_generator():
         """生成 SSE 事件"""
@@ -201,8 +203,8 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
             # 从 app.state 获取Agent
             agent = request.app.state.agent
 
-            # 配置 Checkpointing（使用 thread_id）
-            config = {"configurable": {"thread_id": thread_id}}
+            # 配置 Checkpointing（使用 thread_id 和 user_id）
+            config = {"configurable": {"thread_id": thread_id, "user_id": user_id}}
 
             # 构造初始状态（简化版，只需要messages）
             initial_state = {

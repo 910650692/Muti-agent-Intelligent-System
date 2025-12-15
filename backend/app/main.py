@@ -3,27 +3,60 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from mem0 import Memory
 
 from .api import chat, health
+from .config import config
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """管理应用生命周期：启动时创建Agent和AsyncSqliteSaver，关闭时清理"""
+    """管理应用生命周期：启动时创建Agent、AsyncSqliteSaver和Mem0，关闭时清理"""
     # 启动时：创建AsyncSqliteSaver并存储到app.state
     async with AsyncSqliteSaver.from_conn_string("./data/checkpoints.db") as checkpointer:
         app.state.checkpointer = checkpointer
         print("[Lifespan] AsyncSqliteSaver已启动，数据库路径: ./data/checkpoints.db")
 
-        # 创建Agent实例
+        # ✅ 初始化Mem0长期记忆
+        print("[Lifespan] 正在初始化Mem0...")
+        mem0_config = {
+            "llm": {
+                "provider": "deepseek",
+                "config": {
+                    "model": "deepseek-chat",
+                    "temperature": 0.2,
+                    "max_tokens": 2000,
+                    "api_key": config.DEEPSEEK_API_KEY
+                }
+            },
+            "embedder": {
+                "provider": "huggingface",
+                "config": {
+                    "model": config.MEM0_EMBEDDING_MODEL,
+                    "embedding_dims": 512  # ✅ BGE-small-zh-v1.5 的向量维度
+                }
+            },
+            "vector_store": {
+                "provider": "qdrant",
+                "config": {
+                    "collection_name": "navigation_memory",
+                    "path": config.MEM0_DB_PATH,
+                    "embedding_model_dims": 512  # ✅ 明确指定向量维度
+                }
+            }
+        }
+        app.state.memory = Memory.from_config(mem0_config)
+        print(f"[Lifespan] Mem0已启动（Embedding: {config.MEM0_EMBEDDING_MODEL}）")
+
+        # 创建Agent实例（传入memory）
         from .agent.navigation_agent import create_agent
-        app.state.agent = create_agent(checkpointer=checkpointer)
+        app.state.agent = create_agent(checkpointer=checkpointer, memory=app.state.memory)
         print("[Lifespan] NavigationAgent已启动")
 
         yield  # 应用运行期间
 
         # 关闭时：自动清理（async with会处理）
-        print("[Lifespan] NavigationAgent和AsyncSqliteSaver已关闭")
+        print("[Lifespan] NavigationAgent、Mem0和AsyncSqliteSaver已关闭")
 
 
 # 创建 FastAPI 应用
