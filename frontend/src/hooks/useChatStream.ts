@@ -59,6 +59,11 @@ const getOrCreateSessionId = (): string => {
       setIsLoading(true);
       setError(null);
 
+      // 性能指标追踪
+      const startTime = performance.now();
+      let firstTokenTime: number | undefined = undefined;
+      let hasReceivedFirstToken = false;
+
       try {
         const response = await fetch(`${API_BASE_URL}/api/chat/stream`, {
           method: 'POST',
@@ -85,8 +90,10 @@ const getOrCreateSessionId = (): string => {
 
         const nodeMessageIndex = new Map<string, number>();
         const defaultNodeKey = 'assistant';
+        let lastActiveNodeKey = defaultNodeKey;  // 追踪最后活跃的节点
 
         const ensureAssistantMessage = (nodeKey: string, initialContent = '') => {
+          lastActiveNodeKey = nodeKey;  // 更新最后活跃节点
           const timestamp = new Date();
           setMessages((prev) => {
             const newMessages = [...prev];
@@ -98,6 +105,9 @@ const getOrCreateSessionId = (): string => {
                 content: initialContent,
                 timestamp,
                 node: nodeKey,
+                metrics: {
+                  startTime,  // 记录开始时间
+                },
               });
               nodeMessageIndex.set(nodeKey, newMessages.length - 1);
             } else {
@@ -108,6 +118,9 @@ const getOrCreateSessionId = (): string => {
                   content: initialContent,
                   timestamp,
                   node: nodeKey,
+                  metrics: {
+                    startTime,
+                  },
                 });
                 nodeMessageIndex.set(nodeKey, newMessages.length - 1);
               }
@@ -119,6 +132,15 @@ const getOrCreateSessionId = (): string => {
 
         const appendToAssistantMessage = (nodeKey: string, fragment: string) => {
           if (!fragment) return;
+
+          lastActiveNodeKey = nodeKey;  // 更新最后活跃节点
+
+          // 记录首字延迟
+          if (!hasReceivedFirstToken) {
+            firstTokenTime = performance.now();
+            hasReceivedFirstToken = true;
+          }
+
           const timestamp = new Date();
           setMessages((prev) => {
             const newMessages = [...prev];
@@ -130,6 +152,10 @@ const getOrCreateSessionId = (): string => {
                 content: fragment,
                 timestamp,
                 node: nodeKey,
+                metrics: {
+                  startTime,
+                  firstTokenLatency: firstTokenTime ? firstTokenTime - startTime : undefined,
+                },
               });
               index = newMessages.length - 1;
               nodeMessageIndex.set(nodeKey, index);
@@ -138,6 +164,10 @@ const getOrCreateSessionId = (): string => {
                 ...newMessages[index],
                 content: `${newMessages[index].content || ''}${fragment}`,
                 timestamp,
+                metrics: {
+                  startTime,
+                  firstTokenLatency: firstTokenTime ? firstTokenTime - startTime : undefined,
+                },
               };
               newMessages[index] = updated;
             }
@@ -147,6 +177,7 @@ const getOrCreateSessionId = (): string => {
         };
 
         const replaceAssistantMessage = (nodeKey: string, content: string) => {
+          lastActiveNodeKey = nodeKey;  // 更新最后活跃节点
           const timestamp = new Date();
           setMessages((prev) => {
             const newMessages = [...prev];
@@ -158,6 +189,10 @@ const getOrCreateSessionId = (): string => {
                 content,
                 timestamp,
                 node: nodeKey,
+                metrics: {
+                  startTime,
+                  firstTokenLatency: firstTokenTime ? firstTokenTime - startTime : undefined,
+                },
               });
               index = newMessages.length - 1;
               nodeMessageIndex.set(nodeKey, index);
@@ -166,8 +201,41 @@ const getOrCreateSessionId = (): string => {
                 ...newMessages[index],
                 content,
                 timestamp,
+                metrics: {
+                  startTime,
+                  firstTokenLatency: firstTokenTime ? firstTokenTime - startTime : undefined,
+                },
               };
               newMessages[index] = updated;
+            }
+
+            return newMessages;
+          });
+        };
+
+        const updateMetrics = (nodeKey: string) => {
+          const endTime = performance.now();
+          setMessages((prev) => {
+            const newMessages = [...prev];
+            const index = nodeMessageIndex.get(nodeKey);
+
+            if (index !== undefined && newMessages[index]) {
+              // 只更新有实际内容的消息
+              if (newMessages[index].content && newMessages[index].content.trim()) {
+                newMessages[index] = {
+                  ...newMessages[index],
+                  metrics: {
+                    ...newMessages[index].metrics,
+                    startTime,
+                    firstTokenLatency: firstTokenTime ? firstTokenTime - startTime : undefined,
+                    totalLatency: endTime - startTime,
+                  },
+                };
+              } else {
+                // 移除空消息
+                newMessages.splice(index, 1);
+                nodeMessageIndex.delete(nodeKey);
+              }
             }
 
             return newMessages;
@@ -207,6 +275,9 @@ const getOrCreateSessionId = (): string => {
                   setError(data.message || '发生未知错误');
                   break;
                 case 'done':
+                  // 更新性能指标（使用最后活跃的节点或当前节点）
+                  const targetNodeKey = data.node || lastActiveNodeKey;
+                  updateMetrics(targetNodeKey);
                   setIsLoading(false);
                   break;
                 default:
@@ -218,6 +289,11 @@ const getOrCreateSessionId = (): string => {
             }
           }
         }
+
+        // 流式输出结束后，清理assistant的空消息（保留用户消息）
+        setMessages((prev) => prev.filter(msg =>
+          msg.role === 'user' || (msg.content && msg.content.trim())
+        ));
 
         setIsLoading(false);
       } catch (err) {

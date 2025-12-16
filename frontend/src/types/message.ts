@@ -3,12 +3,19 @@ export interface ImageData {
   data: string;
 }
 
+export interface PerformanceMetrics {
+  firstTokenLatency?: number;  // 首字延迟（毫秒）
+  totalLatency?: number;        // 总延迟（毫秒）
+  startTime?: number;           // 开始时间戳
+}
+
 export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: Date;
   node?: string;
   images?: ImageData[];  // 支持多图片
+  metrics?: PerformanceMetrics;  // 性能指标
 }
 
 export interface SSEEvent {

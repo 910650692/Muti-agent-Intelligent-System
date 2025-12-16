@@ -115,8 +115,8 @@ class MCPManager:
                     print(f"[MCP Manager] {server_name} 加载完成，共 {len(client.tools)} 个工具")
 
             except Exception as e:
-                print(f"[MCP Manager] ⚠️  加载 {server_name} 失败: {e}")
-                print(f"[MCP Manager]    → 跳过该 Server，继续加载其他工具")
+                print(f"[MCP Manager] [WARNING] 加载 {server_name} 失败: {e}")
+                print(f"[MCP Manager]            跳过该 Server，继续加载其他工具")
                 # 仅在调试模式下打印详细错误
                 # import traceback
                 # traceback.print_exc()

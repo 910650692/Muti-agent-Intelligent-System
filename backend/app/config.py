@@ -48,10 +48,6 @@ class Config:
     MAX_IMAGE_SIZE_MB = int(os.getenv("MAX_IMAGE_SIZE_MB", "5"))
     ALLOWED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/jpg", "image/webp"]
 
-    # Mem0 长期记忆配置
-    MEM0_EMBEDDING_MODEL = os.getenv("MEM0_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
-    MEM0_DB_PATH = os.getenv("MEM0_DB_PATH", "./data/mem0_db")
-
 
 config = Config()
 

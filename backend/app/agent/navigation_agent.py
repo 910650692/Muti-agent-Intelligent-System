@@ -1,6 +1,7 @@
 """单Agent ReAct架构实现"""
 import asyncio
 import json
+import time
 from typing import List, Any
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langchain_core.tools import BaseTool
@@ -15,6 +16,14 @@ from ..tools.weather_tools import weather_tools
 from .system_prompt import get_system_prompt
 
 
+class AgentConfig:
+    """Agent运行配置"""
+    MAX_ITERATIONS = 10          # 最大循环次数
+    MAX_TOOL_CALLS_PER_ITERATION = 4  # 单轮最多工具调用次数
+    MAX_TOTAL_TOOL_CALLS = 15    # 全局最多工具调用次数
+    TASK_TIMEOUT = 120           # 任务超时时间（秒）
+
+
 class NavigationAgent:
     """导航专用的单Agent ReAct架构
 
@@ -25,24 +34,20 @@ class NavigationAgent:
     4. 结束：输出最终答案
     """
 
-    def __init__(self, checkpointer=None, memory=None):
+    def __init__(self, checkpointer=None):
         """初始化Agent
 
         Args:
             checkpointer: LangGraph checkpointer实例（如AsyncSqliteSaver），用于保存会话状态
-            memory: Mem0 Memory实例，用于长期记忆管理
         """
         print("[NavigationAgent] 初始化单Agent ReAct架构...")
 
         self.system_prompt = get_system_prompt()
         self.tools = self._load_all_tools()
         self.checkpointer = checkpointer
-        self.memory = memory  # ✅ 保存memory实例
         self.app = self._build_graph()
 
         print(f"[NavigationAgent] 初始化完成，共加载 {len(self.tools)} 个工具")
-        if self.memory:
-            print("[NavigationAgent] ✅ Mem0长期记忆已启用")
 
     def _load_all_tools(self) -> List[BaseTool]:
         """加载所有工具"""
@@ -173,77 +178,17 @@ class NavigationAgent:
             包含新消息的字典
         """
         messages = state["messages"]
+        iteration = state.get("iteration_count", 0) + 1  # 循环计数+1
+        total_tool_calls = state.get("total_tool_calls", 0)
 
-        print(f"\n[Reasoning] 开始推理，当前消息数: {len(messages)}")
+        print(f"\n{'='*60}")
+        print(f"[Reasoning] 🔄 第 {iteration}/{AgentConfig.MAX_ITERATIONS} 轮推理")
+        print(f"[Reasoning] 📊 当前消息数: {len(messages)}")
+        print(f"[Reasoning] 🛠️  已调用工具: {total_tool_calls}/{AgentConfig.MAX_TOTAL_TOOL_CALLS} 次")
+        print(f"{'='*60}\n")
 
         # ✅ 智能选择LLM（自动检测是否有图片）
         from ..llm import has_image_content, _extract_text_from_message, _check_message_has_image
-
-        # ✅ 查询Mem0长期记忆
-        memory_context = ""
-        if self.memory and config:
-            try:
-                user_id = config.get("configurable", {}).get("user_id", "default")
-
-                # 提取最新用户消息
-                latest_query = ""
-                for msg in reversed(messages):
-                    if hasattr(msg, 'type') and msg.type == 'human':
-                        latest_query = _extract_text_from_message(msg)
-                        break
-
-                if latest_query:
-                    # 查询相关记忆（限制5条）
-                    relevant_memories = self.memory.search(
-                        query=latest_query,
-                        user_id=user_id,
-                        limit=5
-                    )
-
-                    # ✅ 调试：打印返回类型
-                    print(f"[Memory DEBUG] 查询返回类型: {type(relevant_memories)}")
-                    print(f"[Memory DEBUG] 查询返回内容: {relevant_memories}")
-
-                    if relevant_memories:
-                        # ✅ 兼容不同的返回格式
-                        memory_facts = []
-
-                        # 如果返回的是 {'results': [...]}
-                        if isinstance(relevant_memories, dict) and 'results' in relevant_memories:
-                            results = relevant_memories['results']
-
-                            for m in results:
-                                if isinstance(m, dict):
-                                    # 尝试多个可能的字段名
-                                    fact = (m.get('memory') or
-                                           m.get('text') or
-                                           m.get('content') or
-                                           m.get('data') or
-                                           str(m))
-                                    if fact and fact != str(m):
-                                        memory_facts.append(fact)
-                                elif isinstance(m, str):
-                                    memory_facts.append(m)
-
-                        # 如果是列表（旧格式兼容）
-                        elif isinstance(relevant_memories, list):
-                            for m in relevant_memories:
-                                if isinstance(m, dict):
-                                    fact = m.get('memory', '') or m.get('text', '') or m.get('content', '')
-                                    if fact:
-                                        memory_facts.append(fact)
-                                elif isinstance(m, str):
-                                    memory_facts.append(m)
-
-                        if memory_facts:
-                            memory_context = "\n".join(f"- {fact}" for fact in memory_facts)
-                            print(f"[Memory] 查询到 {len(memory_facts)} 条相关记忆")
-                        else:
-                            print(f"[Memory] 查询返回空结果（可能没有相关记忆或记忆未保存成功）")
-            except Exception as e:
-                print(f"[Memory] 查询失败（降级为无记忆模式）: {e}")
-                import traceback
-                traceback.print_exc()
 
         # 判断是否需要多模态推理
         # 条件：最新消息是 HumanMessage 且包含图片
@@ -279,15 +224,6 @@ class NavigationAgent:
 用户："这是什么？" → 回答："这是两只可爱的小猫咪"（不加标记）
 用户："导航到这里" → 回答："这是延安高架虹桥枢纽出口 [NEED_TOOLS]"（添加标记）
 用户："帮我查附近加油站" → 回答："图片显示当前位置在市中心区域 [NEED_TOOLS]"（添加标记）
-"""
-            # ✅ 注入Mem0记忆
-            if memory_context:
-                vision_system_prompt += f"""
-
-**用户长期记忆**：
-{memory_context}
-
-请结合用户的长期记忆提供个性化服务。
 """
 
             # 构建视觉理解的消息（包含图片）
@@ -359,16 +295,8 @@ class NavigationAgent:
 [用户需求]
 {latest_user_text if latest_user_text else "请根据图片内容提供帮助"}"""
 
-                # ✅ 注入Mem0记忆到system prompt
+                # ✅ 注入system prompt
                 enhanced_system_prompt = self.system_prompt
-                if memory_context:
-                    enhanced_system_prompt = f"""{self.system_prompt}
-
-**用户长期记忆**：
-{memory_context}
-
-请结合用户的长期记忆提供个性化服务。
-"""
 
                 task_messages = [
                     SystemMessage(content=enhanced_system_prompt),
@@ -410,20 +338,9 @@ class NavigationAgent:
             # 清理历史消息中的图片（如果有的话）
             messages_to_send = self._sanitize_messages_for_text_model(messages)
 
-            # ✅ 注入Mem0记忆到system prompt
-            enhanced_system_prompt = self.system_prompt
-            if memory_context:
-                enhanced_system_prompt = f"""{self.system_prompt}
-
-**用户长期记忆**：
-{memory_context}
-
-请结合用户的长期记忆提供个性化服务。
-"""
-
             # 构建完整的消息
             full_messages = [
-                SystemMessage(content=enhanced_system_prompt),
+                SystemMessage(content=self.system_prompt),
                 *messages_to_send
             ]
 
@@ -432,7 +349,7 @@ class NavigationAgent:
             # 打印消息内容摘要
             for i, msg in enumerate(full_messages):
                 msg_type = msg.__class__.__name__
-                content_preview = str(msg.content)[:100] if hasattr(msg, 'content') else "N/A"
+                content_preview = str(msg.content)[:50] if hasattr(msg, 'content') else "N/A"
                 print(f"[Reasoning DEBUG]   [{i}] {msg_type}: {content_preview}...")
 
             merged_chunk = None
@@ -476,42 +393,33 @@ class NavigationAgent:
         else:
             print(f"[Reasoning] 💬 决策: 直接回答用户")
 
-        # ✅ 保存对话到Mem0（只在有实际内容且无工具调用时保存，避免保存中间状态）
-        if self.memory and config and content and not tool_calls:
-            try:
-                user_id = config.get("configurable", {}).get("user_id", "default")
+        return {
+            "messages": [ai_message],
+            "iteration_count": iteration  # 更新循环计数
+        }
 
-                # 构建对话上下文（最近2轮）
-                conversation_text = ""
-                recent_messages = messages[-2:] if len(messages) >= 2 else messages
-                for msg in recent_messages:
-                    if hasattr(msg, 'type'):
-                        if msg.type == 'human':
-                            conversation_text += f"User: {_extract_text_from_message(msg)}\n"
-                        elif msg.type == 'ai':
-                            msg_content = getattr(msg, 'content', '')
-                            if isinstance(msg_content, str) and msg_content:
-                                conversation_text += f"Assistant: {msg_content}\n"
+    @staticmethod
+    def _extract_historical_tool_calls(messages: List[BaseMessage]) -> List[tuple]:
+        """从消息历史中提取已执行过的工具调用
 
-                # 添加当前回复
-                conversation_text += f"Assistant: {content}"
+        Returns:
+            List[tuple]: [(tool_name, frozenset(args.items())), ...]
+        """
+        historical_calls = []
 
-                # ✅ 调试：打印保存内容
-                print(f"[Memory DEBUG] 准备保存，user_id={user_id}")
-                print(f"[Memory DEBUG] 对话内容: {conversation_text[:200]}...")
+        for msg in messages:
+            # 只查看 AIMessage（包含 tool_calls）
+            if isinstance(msg, AIMessage) and hasattr(msg, 'tool_calls') and msg.tool_calls:
+                for call in msg.tool_calls:
+                    tool_name = call.get('name')
+                    args = call.get('args', {})
 
-                # 保存到Mem0（Mem0会自动提取事实）
-                result = self.memory.add(
-                    messages=conversation_text,
-                    user_id=user_id,
-                    metadata={"source": "navigation_agent", "timestamp": str(__import__('time').time())}
-                )
-                print(f"[Memory DEBUG] Mem0返回结果: {result}")
-                print(f"[Memory] 已保存对话记忆（user_id={user_id}）")
-            except Exception as e:
-                print(f"[Memory] 保存失败（不影响主流程）: {e}")
+                    # 创建可哈希的签名
+                    # 将 dict 转为 frozenset，以便可以比较
+                    signature = (tool_name, frozenset(args.items()) if args else frozenset())
+                    historical_calls.append(signature)
 
-        return {"messages": [ai_message]}
+        return historical_calls
 
     async def call_tools(self, state: AgentState) -> dict:
         """执行工具节点：并行执行所有工具调用
@@ -523,10 +431,90 @@ class NavigationAgent:
             包含工具结果的字典
         """
         last_message = state["messages"][-1]
+        total_tool_calls = state.get("total_tool_calls", 0)
+        messages = state["messages"]
 
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
-            print("[Action] ⚠️ 没有工具需要执行")
+            print("[Action] [WARNING] 没有工具需要执行")
             return {}
+
+        # ✅ 重复调用检测
+        print(f"\n{'='*60}")
+        print(f"[Action] [DETECT] 检测重复调用...")
+        print(f"{'='*60}\n")
+
+        # 提取历史工具调用
+        historical_calls = self._extract_historical_tool_calls(messages[:-1])  # 排除当前消息
+        print(f"[Action] 历史工具调用记录: {len(historical_calls)} 次")
+
+        # 检查当前计划的工具调用
+        filtered_tool_calls = []
+        skipped_count = 0
+
+        for call in last_message.tool_calls:
+            tool_name = call.get('name')
+            args = call.get('args', {})
+            signature = (tool_name, frozenset(args.items()) if args else frozenset())
+
+            if signature in historical_calls:
+                # 发现重复调用
+                print(f"[Action] [SKIP] 检测到重复调用，已跳过:")
+                print(f"[Action]        工具: {tool_name}")
+                print(f"[Action]        参数: {args}")
+                skipped_count += 1
+            else:
+                # 非重复调用，保留
+                filtered_tool_calls.append(call)
+
+        # 更新工具调用列表
+        last_message.tool_calls = filtered_tool_calls
+
+        if skipped_count > 0:
+            print(f"\n[Action] [SUCCESS] 重复检测完成，跳过 {skipped_count} 个重复调用")
+            print(f"[Action]           剩余待执行: {len(filtered_tool_calls)} 个工具\n")
+
+        # 如果所有工具都被过滤了
+        if not filtered_tool_calls:
+            print("[Action] [WARNING] 所有工具调用都是重复的，跳过执行")
+            return {"total_tool_calls": total_tool_calls}
+
+        # ✅ 检查单次工具调用数量限制
+        current_tool_count = len(last_message.tool_calls)
+        if current_tool_count > AgentConfig.MAX_TOOL_CALLS_PER_ITERATION:
+            print(f"\n{'='*60}")
+            print(f"[Action] ⚠️ 单次工具调用数量超限！")
+            print(f"[Action] 📊 本次调用: {current_tool_count} 个")
+            print(f"[Action] 📊 限制: {AgentConfig.MAX_TOOL_CALLS_PER_ITERATION} 个")
+            print(f"[Action] 🚫 只执行前 {AgentConfig.MAX_TOOL_CALLS_PER_ITERATION} 个工具")
+            print(f"{'='*60}\n")
+            # 截断工具调用列表
+            last_message.tool_calls = last_message.tool_calls[:AgentConfig.MAX_TOOL_CALLS_PER_ITERATION]
+            current_tool_count = AgentConfig.MAX_TOOL_CALLS_PER_ITERATION
+
+        # ✅ 检查全局工具调用数量限制
+        if total_tool_calls + current_tool_count > AgentConfig.MAX_TOTAL_TOOL_CALLS:
+            remaining_calls = AgentConfig.MAX_TOTAL_TOOL_CALLS - total_tool_calls
+            print(f"\n{'='*60}")
+            print(f"[Action] ⚠️ 全局工具调用数量接近上限！")
+            print(f"[Action] 📊 已调用: {total_tool_calls} 次")
+            print(f"[Action] 📊 本次计划: {current_tool_count} 次")
+            print(f"[Action] 📊 限制: {AgentConfig.MAX_TOTAL_TOOL_CALLS} 次")
+            print(f"[Action] 🚫 只执行前 {remaining_calls} 个工具")
+            print(f"{'='*60}\n")
+            # 截断工具调用列表
+            last_message.tool_calls = last_message.tool_calls[:remaining_calls]
+            current_tool_count = remaining_calls
+
+        # 如果没有工具可以执行了
+        if current_tool_count <= 0:
+            print("[Action] ⚠️ 已达到全局工具调用上限，跳过执行")
+            return {"total_tool_calls": total_tool_calls}
+
+        print(f"\n{'='*60}")
+        print(f"[Action] 🛠️  开始执行工具")
+        print(f"[Action] 📊 本次执行: {current_tool_count} 个工具")
+        print(f"[Action] 📊 全局统计: {total_tool_calls}/{AgentConfig.MAX_TOTAL_TOOL_CALLS} 次")
+        print(f"{'='*60}\n")
 
         tools_map = {tool.name: tool for tool in self.tools}
 
@@ -581,13 +569,22 @@ class NavigationAgent:
                 )
 
         # ✅ 并行执行所有工具调用
-        print(f"[Action] 开始并行执行 {len(last_message.tool_calls)} 个工具...")
         tool_outputs = await asyncio.gather(
             *[run_one(call) for call in last_message.tool_calls]
         )
 
-        print(f"[Action] 所有工具执行完成")
-        return {"messages": tool_outputs}
+        # ✅ 更新全局工具调用计数
+        new_total = total_tool_calls + current_tool_count
+        print(f"\n{'='*60}")
+        print(f"[Action] ✅ 所有工具执行完成")
+        print(f"[Action] 📊 本次执行: {current_tool_count} 个")
+        print(f"[Action] 📊 全局累计: {new_total}/{AgentConfig.MAX_TOTAL_TOOL_CALLS} 次")
+        print(f"{'='*60}\n")
+
+        return {
+            "messages": tool_outputs,
+            "total_tool_calls": new_total  # 更新全局计数器
+        }
 
     def should_continue(self, state: AgentState) -> str:
         """判断是否需要继续调用工具
@@ -599,12 +596,44 @@ class NavigationAgent:
             "action" 或 END
         """
         last_message = state["messages"][-1]
+        iteration_count = state.get("iteration_count", 0)
+        total_tool_calls = state.get("total_tool_calls", 0)
 
-        # 如果最后一条消息是AI消息且包含工具调用，则执行工具
+        # ✅ 检查1：循环次数限制
+        if iteration_count >= AgentConfig.MAX_ITERATIONS:
+            print(f"\n{'='*60}")
+            print(f"[Routing] 🛑 达到最大循环次数限制")
+            print(f"[Routing] 📊 当前循环: {iteration_count}/{AgentConfig.MAX_ITERATIONS}")
+            print(f"[Routing] 🎯 决策: 终止执行")
+            print(f"{'='*60}\n")
+            return END
+
+        # ✅ 检查2：全局工具调用次数限制
+        if total_tool_calls >= AgentConfig.MAX_TOTAL_TOOL_CALLS:
+            print(f"\n{'='*60}")
+            print(f"[Routing] 🛑 达到全局工具调用次数限制")
+            print(f"[Routing] 📊 已调用: {total_tool_calls}/{AgentConfig.MAX_TOTAL_TOOL_CALLS} 次")
+            print(f"[Routing] 🎯 决策: 终止执行")
+            print(f"{'='*60}\n")
+            return END
+
+        # ✅ 检查3：是否有工具需要调用
         if isinstance(last_message, AIMessage) and last_message.tool_calls:
+            print(f"\n{'='*60}")
+            print(f"[Routing] 🔄 需要调用工具")
+            print(f"[Routing] 📊 当前循环: {iteration_count}/{AgentConfig.MAX_ITERATIONS}")
+            print(f"[Routing] 📊 已调用工具: {total_tool_calls}/{AgentConfig.MAX_TOTAL_TOOL_CALLS} 次")
+            print(f"[Routing] 🎯 决策: 进入Action节点")
+            print(f"{'='*60}\n")
             return "action"
 
-        # 否则结束
+        # ✅ 没有工具需要调用，正常结束
+        print(f"\n{'='*60}")
+        print(f"[Routing] ✅ 任务完成")
+        print(f"[Routing] 📊 总循环次数: {iteration_count}")
+        print(f"[Routing] 📊 总工具调用: {total_tool_calls} 次")
+        print(f"[Routing] 🎯 决策: 结束执行")
+        print(f"{'='*60}\n")
         return END
 
     async def astream_events(self, initial_state: dict, config: dict):
@@ -623,14 +652,13 @@ class NavigationAgent:
             yield event
 
 
-def create_agent(checkpointer=None, memory=None) -> NavigationAgent:
+def create_agent(checkpointer=None) -> NavigationAgent:
     """创建Agent实例
 
     Args:
         checkpointer: LangGraph checkpointer实例
-        memory: Mem0 Memory实例
 
     Returns:
         NavigationAgent实例
     """
-    return NavigationAgent(checkpointer=checkpointer, memory=memory)
+    return NavigationAgent(checkpointer=checkpointer)

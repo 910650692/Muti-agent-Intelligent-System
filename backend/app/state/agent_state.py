@@ -15,3 +15,9 @@ class AgentState(TypedDict):
 
     # 消息历史（支持累加）
     messages: Annotated[List[BaseMessage], operator.add]
+
+    # 循环计数器（用于限制最大循环次数）
+    iteration_count: int
+
+    # 工具调用计数器（全局）
+    total_tool_calls: int

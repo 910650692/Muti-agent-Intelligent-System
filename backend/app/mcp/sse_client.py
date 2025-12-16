@@ -109,7 +109,7 @@ class SSEMCPClient:
             yield self
 
         except Exception as e:
-            print(f"[SSE MCP Client] [{self.server_name}] ⚠️  连接失败: {e}")
+            print(f"[SSE MCP Client] [{self.server_name}] [WARNING] 连接失败: {e}")
             # 仅在调试模式下打印详细错误
             # import traceback
             # traceback.print_exc()

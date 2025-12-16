@@ -6,6 +6,7 @@ from typing import List, Optional, Any, Iterable, Dict, Set
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 import json
 import asyncio
+import time
 
 # Agent从app.state中获取，不需要导入
 from ..config import config
@@ -150,9 +151,11 @@ async def chat(chat_request: ChatRequest, request: Request):
     # 配置 Checkpointing（使用 thread_id）
     config = {"configurable": {"thread_id": chat_request.thread_id}}
 
-    # 构造初始状态（简化版，只需要messages）
+    # 构造初始状态（包含消息和计数器）
     initial_state = {
         "messages": [build_message(chat_request.message, chat_request.images)],
+        "iteration_count": 0,      # 初始化循环计数器
+        "total_tool_calls": 0,     # 初始化工具调用计数器
     }
 
     # 运行 Agent
@@ -206,9 +209,11 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
             # 配置 Checkpointing（使用 thread_id 和 user_id）
             config = {"configurable": {"thread_id": thread_id, "user_id": user_id}}
 
-            # 构造初始状态（简化版，只需要messages）
+            # 构造初始状态（包含消息和计数器）
             initial_state = {
                 "messages": [build_message(user_message, chat_request.images)],
+                "iteration_count": 0,      # 初始化循环计数器
+                "total_tool_calls": 0,     # 初始化工具调用计数器
             }
 
             # 状态跟踪
@@ -233,7 +238,21 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
                 return fallback
 
             # ✅ 使用 Agent 的 astream_events 获取真正的流式输出
+            # ✅ 添加超时保护（2分钟）
+            start_time = time.time()
             async for event in agent.astream_events(initial_state, config):
+                # 检查是否超时
+                elapsed = time.time() - start_time
+                if elapsed > 120:  # 2分钟
+                    print(f"\n{'='*60}")
+                    print(f"[Stream] ⚠️ Agent执行超时！")
+                    print(f"[Stream] 📊 已执行时间: {elapsed:.2f} 秒")
+                    print(f"[Stream] 📊 超时限制: 120 秒（2分钟）")
+                    print(f"[Stream] 🚫 强制终止执行")
+                    print(f"{'='*60}\n")
+                    yield f"data: {json.dumps({'type': 'error', 'message': '任务执行超时（2分钟），已强制终止'}, ensure_ascii=False)}\n\n"
+                    break
+
                 event_type = event["event"]
                 event_name = event.get("name", "")
 
@@ -322,8 +341,8 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
 
                         current_message = ""
 
-            # 发送完成事件
-            yield f"data: {json.dumps({'type': 'done', 'message': '处理完成'}, ensure_ascii=False)}\n\n"
+            # 发送完成事件（包含最后的节点信息）
+            yield f"data: {json.dumps({'type': 'done', 'message': '处理完成', 'node': current_node}, ensure_ascii=False)}\n\n"
 
         except Exception as e:
             import traceback
