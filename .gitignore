@@ -28,6 +28,7 @@ yarn-error.log*
 data/
 *.db
 *.log
+logs/  # 日志目录
 
 # IDE
 .vscode/

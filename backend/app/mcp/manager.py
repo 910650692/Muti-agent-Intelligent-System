@@ -195,6 +195,70 @@ class MCPManager:
         if self._loop_thread:
             self._loop_thread.join(timeout=5)
 
+    def get_sse_connection_status(self) -> Dict[str, Dict[str, Any]]:
+        """
+        获取所有 SSE 连接的状态
+
+        Returns:
+            {server_name: {"connected": bool, "tools_count": int, "session_id": str}}
+        """
+        status = {}
+        for server_name, client in self._sse_clients.items():
+            status[server_name] = {
+                "connected": client.is_connected,
+                "tools_count": len(client.tools) if client.tools else 0,
+                "session_id": client.session_id,
+                "base_url": client.base_url
+            }
+        return status
+
+    async def reconnect_sse_async(self, server_name: str = None) -> Dict[str, bool]:
+        """
+        异步重连 SSE 客户端
+
+        Args:
+            server_name: 指定重连的服务名称，None 则重连所有
+
+        Returns:
+            {server_name: success}
+        """
+        results = {}
+
+        if server_name:
+            # 重连指定的服务
+            client = self._sse_clients.get(server_name)
+            if client:
+                results[server_name] = await client.reconnect()
+            else:
+                results[server_name] = False
+        else:
+            # 重连所有 SSE 服务
+            for name, client in self._sse_clients.items():
+                if not client.is_connected:
+                    results[name] = await client.reconnect()
+                else:
+                    results[name] = True
+
+        return results
+
+    def reconnect_sse(self, server_name: str = None) -> Dict[str, bool]:
+        """
+        同步重连 SSE 客户端
+
+        Args:
+            server_name: 指定重连的服务名称，None 则重连所有
+
+        Returns:
+            {server_name: success}
+        """
+        self._ensure_event_loop()
+
+        future = asyncio.run_coroutine_threadsafe(
+            self.reconnect_sse_async(server_name),
+            self._main_loop
+        )
+        return future.result(timeout=30)
+
     def _create_langchain_tool(
         self,
         server_name: str,

@@ -14,6 +14,15 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
       return `${(ms / 1000).toFixed(2)}s`;
     };
 
+    // 过滤掉 detected_memories 标记（用户不应该看到这些技术标记）
+    const filterContent = (content: string): string => {
+      // 移除 __DETECTED_MEMORIES__ ... __END_DETECTED_MEMORIES__ 块
+      return content.replace(
+        /__DETECTED_MEMORIES__[\s\S]*?__END_DETECTED_MEMORIES__/g,
+        ''
+      ).trim();
+    };
+
     return (
       <div
         className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-4`}
@@ -42,7 +51,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
           {/* 显示文本内容 */}
           {message.content && (
             <div className="whitespace-pre-wrap break-words">
-              {message.content}
+              {filterContent(message.content)}
             </div>
           )}
 

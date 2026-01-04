@@ -34,6 +34,17 @@ class SSEMCPClient:
         self._message_queue: asyncio.Queue = asyncio.Queue()
         self._pending_requests: Dict[int, asyncio.Future] = {}
 
+        # 连接状态
+        self._connected: bool = False
+        self._reconnect_lock: asyncio.Lock = asyncio.Lock()
+        self._max_reconnect_attempts: int = 3
+        self._reconnect_delay: float = 2.0  # 重连延迟（秒）
+
+        # 心跳监控
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._heartbeat_interval: float = 10.0  # 心跳检查间隔（秒）
+        self._auto_reconnect_enabled: bool = True  # 是否启用自动重连
+
     @asynccontextmanager
     async def connect(self, url: str):
         """
@@ -106,15 +117,33 @@ class SSEMCPClient:
                 else:
                     print(f"  - {tool}")
 
+            self._connected = True
+
+            # 启动心跳监控任务
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_monitor())
+            print(f"[SSE MCP Client] [{self.server_name}] 心跳监控已启动")
+
             yield self
 
         except Exception as e:
             print(f"[SSE MCP Client] [{self.server_name}] [WARNING] 连接失败: {e}")
+            self._connected = False
             # 仅在调试模式下打印详细错误
             # import traceback
             # traceback.print_exc()
             raise
         finally:
+            self._connected = False
+            self._auto_reconnect_enabled = False  # 停止自动重连
+
+            # 停止心跳监控任务
+            if self._heartbeat_task:
+                self._heartbeat_task.cancel()
+                try:
+                    await self._heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+
             # 取消SSE监听任务
             if self._sse_task:
                 self._sse_task.cancel()
@@ -130,6 +159,129 @@ class SSEMCPClient:
         """等待从SSE获取endpoint"""
         while not self.session_id:
             await asyncio.sleep(0.1)
+
+    @property
+    def is_connected(self) -> bool:
+        """检查连接是否有效"""
+        if not self._connected:
+            return False
+        if self._sse_task and self._sse_task.done():
+            return False
+        return True
+
+    async def reconnect(self) -> bool:
+        """
+        尝试重新连接到 MCP Server
+
+        Returns:
+            是否重连成功
+        """
+        async with self._reconnect_lock:
+            if self.is_connected:
+                return True
+
+            print(f"[SSE MCP Client] [{self.server_name}] 尝试重新连接...")
+
+            for attempt in range(1, self._max_reconnect_attempts + 1):
+                try:
+                    # 清理旧连接
+                    if self._sse_task and not self._sse_task.done():
+                        self._sse_task.cancel()
+                        try:
+                            await self._sse_task
+                        except asyncio.CancelledError:
+                            pass
+
+                    if self.client:
+                        await self.client.aclose()
+
+                    # 重置状态
+                    self.session_id = None
+                    self.message_url = None
+                    self._pending_requests.clear()
+
+                    # 重新创建 client
+                    self.client = httpx.AsyncClient(
+                        timeout=httpx.Timeout(
+                            connect=10.0,
+                            read=None,
+                            write=10.0,
+                            pool=10.0
+                        )
+                    )
+
+                    # 启动SSE监听
+                    self._sse_task = asyncio.create_task(self._sse_listener(self.base_url))
+
+                    # 等待获取endpoint
+                    await asyncio.wait_for(self._wait_for_endpoint(), timeout=5.0)
+
+                    if not self.session_id:
+                        raise Exception("未能获取sessionId")
+
+                    # 重新初始化
+                    await self._call_method("initialize", {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {
+                            "name": "python-mcp-client",
+                            "version": "1.0.0"
+                        }
+                    })
+
+                    # 重新获取工具列表
+                    tools_result = await self._call_method("tools/list", {})
+                    if "tools" in tools_result:
+                        self.tools = tools_result["tools"]
+                    elif isinstance(tools_result, list):
+                        self.tools = tools_result
+
+                    self._connected = True
+                    self._auto_reconnect_enabled = True  # 重连成功后重新启用自动重连
+                    print(f"[SSE MCP Client] [{self.server_name}] 重连成功！共 {len(self.tools)} 个工具")
+                    return True
+
+                except Exception as e:
+                    print(f"[SSE MCP Client] [{self.server_name}] 重连失败 (尝试 {attempt}/{self._max_reconnect_attempts}): {e}")
+                    if attempt < self._max_reconnect_attempts:
+                        await asyncio.sleep(self._reconnect_delay)
+
+            print(f"[SSE MCP Client] [{self.server_name}] 重连失败，已达最大尝试次数")
+            return False
+
+    async def _heartbeat_monitor(self):
+        """
+        心跳监控任务：定期检查连接状态，如果断开则自动重连
+        """
+        print(f"[SSE MCP Client] [{self.server_name}] 心跳监控线程已启动")
+
+        while self._auto_reconnect_enabled:
+            try:
+                await asyncio.sleep(self._heartbeat_interval)
+
+                # 检查连接状态
+                if not self.is_connected:
+                    print(f"[SSE MCP Client] [{self.server_name}] 心跳检测: 连接已断开")
+
+                    # 尝试重连
+                    if self._auto_reconnect_enabled:
+                        print(f"[SSE MCP Client] [{self.server_name}] 心跳触发自动重连...")
+                        success = await self.reconnect()
+
+                        if success:
+                            print(f"[SSE MCP Client] [{self.server_name}] 心跳重连成功！")
+                        else:
+                            print(f"[SSE MCP Client] [{self.server_name}] 心跳重连失败，{self._heartbeat_interval}秒后再试")
+                else:
+                    # 连接正常，可以选择性打印日志（避免刷屏）
+                    pass  # print(f"[SSE MCP Client] [{self.server_name}] 心跳检测: 连接正常")
+
+            except asyncio.CancelledError:
+                print(f"[SSE MCP Client] [{self.server_name}] 心跳监控已停止")
+                break
+            except Exception as e:
+                print(f"[SSE MCP Client] [{self.server_name}] 心跳监控异常: {e}")
+                # 继续监控，不要退出
 
     async def _sse_listener(self, url: str):
         """
@@ -155,8 +307,10 @@ class SSEMCPClient:
 
         except asyncio.CancelledError:
             # 正常取消，不打印日志（避免噪音）
+            self._connected = False
             raise
         except Exception as e:
+            self._connected = False
             # 只在非预期错误时打印
             if "502" in str(e) or "连接失败" in str(e):
                 # 常见的服务未启动错误，静默处理
@@ -292,7 +446,7 @@ class SSEMCPClient:
 
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
         """
-        调用 MCP 工具
+        调用 MCP 工具（带自动重连）
 
         Args:
             tool_name: 工具名称
@@ -304,12 +458,34 @@ class SSEMCPClient:
         print(f"[SSE MCP Client] [{self.server_name}] 调用工具: {tool_name}")
         print(f"[SSE MCP Client] [{self.server_name}] 参数: {arguments}")
 
-        # 调用 tools/call 方法
-        result = await self._call_method("tools/call", {
-            "name": tool_name,
-            "arguments": arguments
-        })
+        # 检查连接状态，如果断开则尝试重连
+        if not self.is_connected:
+            print(f"[SSE MCP Client] [{self.server_name}] 检测到连接断开，尝试重连...")
+            reconnected = await self.reconnect()
+            if not reconnected:
+                raise Exception(f"[{self.server_name}] MCP 连接已断开，重连失败")
 
-        print(f"[SSE MCP Client] [{self.server_name}] 工具返回: {result}")
+        try:
+            # 调用 tools/call 方法
+            result = await self._call_method("tools/call", {
+                "name": tool_name,
+                "arguments": arguments
+            })
 
-        return result
+            print(f"[SSE MCP Client] [{self.server_name}] 工具返回: {result}")
+            return result
+
+        except Exception as e:
+            # 如果调用失败，检查是否是连接问题，尝试重连后重试一次
+            if "会话未建立" in str(e) or "502" in str(e) or "连接" in str(e):
+                print(f"[SSE MCP Client] [{self.server_name}] 调用失败，尝试重连后重试...")
+                reconnected = await self.reconnect()
+                if reconnected:
+                    # 重连成功，重试一次
+                    result = await self._call_method("tools/call", {
+                        "name": tool_name,
+                        "arguments": arguments
+                    })
+                    print(f"[SSE MCP Client] [{self.server_name}] 重试成功，工具返回: {result}")
+                    return result
+            raise
