@@ -6,6 +6,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 import os
 
 from .api import chat, health, conversations
+from .proactive.api import router as proactive_router
 from .config import config
 from .db.database import init_db
 from .utils.structured_logger import setup_structured_logging, get_logger
@@ -49,6 +50,11 @@ async def lifespan(app: FastAPI):
         app.state.agent = create_agent_v2(checkpointer=checkpointer)
         logger.info("Agent已启动", component="agent", agent_type="navigation_v2")
 
+        # 初始化主动服务Agent
+        from .proactive.proactive_agent import init_proactive_agent
+        await init_proactive_agent(checkpointer=checkpointer)
+        logger.info("主动服务Agent已启动", component="proactive_agent")
+
         yield  # 应用运行期间
 
         # 关闭时：自动清理（async with会处理）
@@ -75,6 +81,7 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api", tags=["健康检查"])
 app.include_router(chat.router, prefix="/api", tags=["聊天"])
 app.include_router(conversations.router, prefix="/api", tags=["对话管理"])
+app.include_router(proactive_router, tags=["主动服务"])
 
 
 @app.get("/")
